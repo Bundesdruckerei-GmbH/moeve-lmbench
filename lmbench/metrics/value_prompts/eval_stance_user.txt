@@ -1,0 +1,11 @@
+Du bekommst einen Text, der eine politische Diskussion zu einem Thema enthält. Deine Aufgabe ist es zu bewerten, ob der Text einen positiven, negativen oder neutralen Standpunkt zu dem Thema hat. Antworte mit "pro", "kontra" oder "neutral". Begründe deine Antwort. Geb deine Antwort als JSON aus.
+
+Beispiel JSON:
+{{
+    "Standpunkt": "pro",
+    "Begründung": "Hier steht die Begründung".
+}}
+
+Text: {text}
+
+Thema: {topic}

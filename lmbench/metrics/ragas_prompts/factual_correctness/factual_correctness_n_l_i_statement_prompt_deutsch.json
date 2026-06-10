@@ -1,0 +1,60 @@
+{
+  "ragas_version": "0.4.2",
+  "original_hash": 2204413747080169901,
+  "language": "deutsch",
+  "instruction": "Your task is to judge the faithfulness of a series of statements based on a given context. For each statement you must return verdict as 1 if the statement can be directly inferred based on the context or 0 if the statement can not be directly inferred based on the context.",
+  "examples": [
+    {
+      "input": {
+        "context": "John ist Student an der XYZ-Universität. Er strebt einen Abschluss in Informatik an. Er ist in diesem Semester in mehrere Kurse eingeschrieben, darunter Datenstrukturen, Algorithmen und Datenbankverwaltung. John ist ein fleißiger Student und verbringt viel Zeit mit Lernen und dem Erledigen von Aufgaben. Er bleibt oft bis spät in der Bibliothek, um an seinen Projekten zu arbeiten.",
+        "statements": [
+          "John studiert Biologie.",
+          "John belegt einen Kurs über Künstliche Intelligenz.",
+          "John ist ein engagierter Student.",
+          "John hat einen Teilzeitjob."
+        ]
+      },
+      "output": {
+        "statements": [
+          {
+            "statement": "John studiert Biologie.",
+            "reason": "Johns Hauptfach wird ausdrücklich als Informatik erwähnt. Es gibt keine Informationen, die darauf hindeuten, dass er Biologie studiert.",
+            "verdict": 0
+          },
+          {
+            "statement": "John belegt einen Kurs über Künstliche Intelligenz.",
+            "reason": "Der Kontext erwähnt die Kurse, in die John derzeit eingeschrieben ist, und Künstliche Intelligenz wird nicht erwähnt. Daher kann nicht geschlossen werden, dass John einen Kurs über KI belegt.",
+            "verdict": 0
+          },
+          {
+            "statement": "John ist ein engagierter Student.",
+            "reason": "Der Kontext besagt, dass er viel Zeit mit Lernen und dem Erledigen von Aufgaben verbringt. Außerdem wird erwähnt, dass er oft bis spät in der Bibliothek bleibt, um an seinen Projekten zu arbeiten, was auf Engagement hinweist.",
+            "verdict": 1
+          },
+          {
+            "statement": "John hat einen Teilzeitjob.",
+            "reason": "Es gibt keine Informationen im Kontext, die darauf hinweisen, dass John einen Teilzeitjob hat.",
+            "verdict": 0
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "context": "Photosynthese ist ein Prozess, den Pflanzen, Algen und bestimmte Bakterien nutzen, um Lichtenergie in chemische Energie umzuwandeln.",
+        "statements": [
+          "Albert Einstein war ein Genie."
+        ]
+      },
+      "output": {
+        "statements": [
+          {
+            "statement": "Albert Einstein war ein Genie.",
+            "reason": "Der Kontext und die Aussage sind nicht miteinander verbunden.",
+            "verdict": 0
+          }
+        ]
+      }
+    }
+  ]
+}

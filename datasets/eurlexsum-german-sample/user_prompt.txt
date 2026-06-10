@@ -1,0 +1,6 @@
+Sie sind ein Berater, der auf das Zusammenfassen von Gesetzestexten  spezialisiert ist.
+Geben Sie eine Zusammenfassung des folgenden Europäischen Gesetzes, dass dem Leser einen umfänglichen Überblick über das Gesetz gibt.
+
+Gesetzestext:
+
+{document}

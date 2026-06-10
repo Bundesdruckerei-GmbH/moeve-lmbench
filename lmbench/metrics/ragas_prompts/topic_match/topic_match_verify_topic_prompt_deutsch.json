@@ -1,0 +1,176 @@
+{
+  "ragas_version": "0.4.2",
+  "original_hash": 885039585423047652,
+  "language": "deutsch",
+  "instruction": "You are given two lists of topic strings:\n  • query_topics (the extracted topics to check)\n  • reference_topics (the gold-standard topics)\n\nFor each query topic:\n  1. Normalize case, ignore trivial punctuation, and treat plural/singular forms as equivalent.\n  2. Allow fuzzy and semantic matches: consider shared stems, domain overlap, thematic similarity,\n     synonyms, and derivational variants.\n  3. Expand known acronyms when matching.\n  4. If a query topic broadly or semantically aligns with any reference topic, count it as a match.\n  5. Use domain knowledge and policy/legal context where applicable.\n  6. Return true with a concise reason if matched; otherwise false with an explanation.\n\nReturn *only* a JSON object with one key \"results\", whose value is an array of\nobjects in the same order as query_topics. Each object must have exactly:\n  {\n    \"reason\": <string>,\n    \"verdict\": true or false\n  }\nDo not include any extra text or formatting.",
+  "examples": [
+    {
+      "input": {
+        "query_topics": [
+          "Gesundheitswesen",
+          "Bildung"
+        ],
+        "reference_topics": [
+          "Wirtschaft",
+          "Gesundheitswesen",
+          "Bildung"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Exakte Übereinstimmung 'Gesundheitswesen' in den Referenzen gefunden.",
+            "verdict": true
+          },
+          {
+            "reason": "Exakte Übereinstimmung 'Bildung' in den Referenzen gefunden.",
+            "verdict": true
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "Erneuerbare Energien",
+          "CO2-Steuern"
+        ],
+        "reference_topics": [
+          "Klimawandel",
+          "Erneuerbare Energien",
+          "CO2-Steuern"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Exakte Übereinstimmung 'Erneuerbare Energien' in den Referenzen gefunden.",
+            "verdict": true
+          },
+          {
+            "reason": "Exakte Übereinstimmung 'CO2-Steuern' in den Referenzen gefunden.",
+            "verdict": true
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "Wirtschaftswissenschaften",
+          "Politik"
+        ],
+        "reference_topics": [
+          "Wirtschaft",
+          "Bildung"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "'Wirtschaftswissenschaften' ist semantisch ähnlich zu 'Wirtschaft', daher als Übereinstimmung betrachtet.",
+            "verdict": true
+          },
+          {
+            "reason": "'Politik' wurde nicht unter den Referenzthemen gefunden.",
+            "verdict": false
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "Hunde",
+          "Auto"
+        ],
+        "reference_topics": [
+          "Hund",
+          "Automobil"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Plural 'Hunde' normalisiert zu 'Hund', Übereinstimmung gefunden.",
+            "verdict": true
+          },
+          {
+            "reason": "'Auto' ist ein Synonym von 'Automobil', Übereinstimmung gefunden.",
+            "verdict": true
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "Alkylphenolethoxylat"
+        ],
+        "reference_topics": [
+          "Alkylphenolethoxylate"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Kleinere Unterschiede in Zeichensetzung und Pluralisierung ignoriert; Übereinstimmung gefunden.",
+            "verdict": true
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "Digitalstrategie",
+          "Zukunftssicherheit"
+        ],
+        "reference_topics": [
+          "Digitale Gesellschaft",
+          "Digitaler Staat",
+          "Digitale Wirtschaft",
+          "Digitale Wissenschaft",
+          "Internationale Datenpolitik",
+          "Schlüsselprojekte"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Teilt den Wortstamm 'Digital-' und den Kontext einer Strategie im digitalen Bereich; als Übereinstimmung betrachtet.",
+            "verdict": true
+          },
+          {
+            "reason": "Keine klare thematische oder sprachliche Überschneidung mit einem Referenzthema.",
+            "verdict": false
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "query_topics": [
+          "ErbSTG",
+          "GmbHG-VE"
+        ],
+        "reference_topics": [
+          "Erbschaft- und Schenkungsteuerrecht",
+          "Verantwortungseigentum"
+        ]
+      },
+      "output": {
+        "results": [
+          {
+            "reason": "Akronym 'ErbSTG' erweitert zu 'Erbschaft- und Schenkungsteuerrecht'; Übereinstimmung gefunden.",
+            "verdict": true
+          },
+          {
+            "reason": "Die Endung 'VE' in 'GmbHG-VE' steht für 'Verantwortungseigentum'; Übereinstimmung gefunden.",
+            "verdict": true
+          }
+        ]
+      }
+    }
+  ]
+}

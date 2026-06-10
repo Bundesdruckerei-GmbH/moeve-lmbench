@@ -1,0 +1,6 @@
+This dataset is a 10-row sample from EUR-Lex-Sum.
+
+Source: https://huggingface.co/datasets/dennlinger/eur-lex-sum
+Authors: Dennis Aumiller, Ashish Chouhan, Michael Gertz
+Paper: "EUR-Lex-Sum: A Multi- and Cross-lingual Dataset for Long-form Summarization in the Legal Domain" (EMNLP 2022)
+License: Creative Commons Attribution 4.0 International (CC-BY-4.0)

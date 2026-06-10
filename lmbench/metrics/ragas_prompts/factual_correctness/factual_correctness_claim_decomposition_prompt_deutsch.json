@@ -1,0 +1,29 @@
+{
+  "ragas_version": "0.4.2",
+  "original_hash": 1186309294570259480,
+  "language": "deutsch",
+  "instruction": "\n    Decompose and break down each of the input sentences into one or more standalone statements. Each statement should be a standalone claim that can be independently verified.\n    Follow the level of atomicity and coverage as shown in the examples.\n    ",
+  "examples": [
+    {
+      "input": {
+        "response": "Charles Babbage war ein französischer Mathematiker, Philosoph und Lebensmittelkritiker."
+      },
+      "output": {
+        "claims": [
+          "Charles Babbage war ein Mathematiker und Philosoph."
+        ]
+      }
+    },
+    {
+      "input": {
+        "response": "Albert Einstein war ein deutscher theoretischer Physiker. Er entwickelte die Relativitätstheorie und trug auch zur Entwicklung der Quantenmechanik bei."
+      },
+      "output": {
+        "claims": [
+          "Albert Einstein war ein deutscher Physiker.",
+          "Albert Einstein entwickelte die Relativitätstheorie und trug zur Quantenmechanik bei."
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+task: summarization
+filename: dataset.parquet
+dataset_type: dataframe
+config: # Optional system_prompt if llm request should be split up into SYSTEM and USER message
+  user_prompt: user_prompt.txt
+  target_column: summary
+  shrink_column: document

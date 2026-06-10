@@ -1,0 +1,19 @@
+dataset_folder: datasets
+tokenizer_folder: tokenizer
+cache_file: cache_v2.sqlite
+cache_folder: cache
+output_folder: output
+resources_folder: resources
+retry:
+  stop_after_attempt: 20
+  min_wait: 10
+  max_wait: 120
+judge_llm:
+  provider: openai
+  model: gpt-4o-mini
+  base_url: ""
+  api_key: "${oc.env:OPENAI_API_KEY,\"\"}"
+semscore:
+  embedding_model_name: jinaai/jina-embeddings-v2-base-de
+  embedding_model_ctx_size: 4096
+  chunk_size: 1

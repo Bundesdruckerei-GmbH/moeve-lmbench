@@ -1,0 +1,9 @@
+task: question_answering
+filename: dataset.parquet
+dataset_type: dataframe
+config: # Optional system_prompt if llm request should be split up into SYSTEM and USER message
+  user_prompt: user_prompt.txt
+  target_column: answer
+  shrink_column: context
+  question_column: question
+  context_column: context

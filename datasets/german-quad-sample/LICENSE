@@ -1,0 +1,6 @@
+This dataset is a 10-row sample from GermanQuAD.
+
+Source: https://huggingface.co/datasets/deepset/germanquad
+Authors: Timo Moller, Julian Risch, Malte Pietsch et al. (deepset.ai)
+Paper: "GermanQuAD and GermanDPR: Improving Non-English Question Answering and Passage Retrieval" (2021)
+License: Creative Commons Attribution 4.0 International (CC-BY-4.0)

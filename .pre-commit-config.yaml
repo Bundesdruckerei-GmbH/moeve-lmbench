@@ -1,0 +1,39 @@
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-ast
+      - id: check-builtin-literals
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: 'v3.21.0'
+    hooks:
+      - id: pyupgrade
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.14.10
+    hooks:
+      # Run the linter.
+      - id: ruff-check
+        files: \.py$
+        args: [ --fix ]
+      # Run the formatter.
+      - id: ruff-format
+        files: \.py$
+
+  - repo: https://github.com/DetachHead/basedpyright-prek-mirror
+    rev: 1.36.1
+    hooks:
+        - id: basedpyright

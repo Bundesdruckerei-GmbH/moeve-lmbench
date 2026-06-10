@@ -1,0 +1,22 @@
+{
+  "ragas_version": "0.4.2",
+  "original_hash": 64688369469268582,
+  "language": "deutsch",
+  "instruction": "Given a question and an answer, analyze the complexity of each sentence in the answer. Break down each sentence into one or more fully understandable statements. Ensure that no pronouns are used in any statement. Format the outputs in JSON.",
+  "examples": [
+    {
+      "input": {
+        "question": "Wer war Albert Einstein und wofür ist er am bekanntesten?",
+        "answer": "Er war ein in Deutschland geborener theoretischer Physiker, der weithin als einer der größten und einflussreichsten Physiker aller Zeiten anerkannt wird. Er ist am bekanntesten für die Entwicklung der Relativitätstheorie, er leistete auch wichtige Beiträge zur Entwicklung der Quantenmechanik."
+      },
+      "output": {
+        "statements": [
+          "Albert Einstein war ein in Deutschland geborener theoretischer Physiker.",
+          "Albert Einstein wird als einer der größten und einflussreichsten Physiker aller Zeiten anerkannt.",
+          "Albert Einstein ist am bekanntesten für die Entwicklung der Relativitätstheorie.",
+          "Albert Einstein leistete auch wichtige Beiträge zur Entwicklung der Quantenmechanik."
+        ]
+      }
+    }
+  ]
+}

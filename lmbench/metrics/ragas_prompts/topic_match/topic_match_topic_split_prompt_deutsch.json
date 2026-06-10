@@ -1,0 +1,56 @@
+{
+  "ragas_version": "0.4.2",
+  "original_hash": 1189703297015786996,
+  "language": "deutsch",
+  "instruction": "Split the string into individual topics (separated by commas, newlines, or bullets). Strip any leading bullets, dashes, numbers or whitespace from each topic. Do not otherwise alter the wording; return each clean topic as a string.",
+  "examples": [
+    {
+      "input": {
+        "input_string": "Wirtschaft, Gesundheitswesen, Bildung"
+      },
+      "output": {
+        "output_list": [
+          "Wirtschaft",
+          "Gesundheitswesen",
+          "Bildung"
+        ]
+      }
+    },
+    {
+      "input": {
+        "input_string": "Hier sind die Themen: Klimawandel, erneuerbare Energien, Kohlenstoffsteuern"
+      },
+      "output": {
+        "output_list": [
+          "Klimawandel",
+          "Erneuerbare Energien",
+          "Kohlenstoffsteuern"
+        ]
+      }
+    },
+    {
+      "input": {
+        "input_string": "* Alkylphenole\n* Alkylphenolethoxylat\n* Bisphenol A"
+      },
+      "output": {
+        "output_list": [
+          "Alkylphenole",
+          "Alkylphenolethoxylat",
+          "Bisphenol A"
+        ]
+      }
+    },
+    {
+      "input": {
+        "input_string": "Politik\nGesundheitswesen\nBildung"
+      },
+      "output": {
+        "output_list": [
+          "Politik",
+          "Gesundheitswesen",
+          "Bildung"
+        ]
+      }
+    }
+  ]
+}
