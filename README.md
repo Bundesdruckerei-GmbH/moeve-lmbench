@@ -219,6 +219,14 @@ The `ctx_size` model arg controls the maximum context size. LMBench uses a token
 
 Place the tokenizer files (`tokenizer.json`, `tokenizer_config.json`) in a subfolder of `tokenizer/` named after the model or model family. For example, `tokenizer/llama-3.1/` will be used for any model whose name starts with `llama-3.1`.
 
+To pull a tokenizer directly from the HuggingFace Hub, use the helper script:
+
+```bash
+uv run python scripts/download_hf_tokenizer.py google/gemma-3-27b-it
+```
+
+It downloads only tokenizer-related files into `tokenizer/<derived-name>/` and verifies that they load under the currently pinned `transformers` version. Some newer checkpoints (e.g. Gemma) ship a `tokenizer_config.json` written against transformers 5 conventions and fail to load on the transformers 4.x line that lmbench depends on — for example, `extra_special_tokens` is now expected as a `{name: token}` dict but is sometimes serialized as a bare list. When the script detects such a known transformers-5-vs-4 incompatibility it patches the config in place and retries.
+
 ## Caching
 
 LMBench has two layers of cache, both under `CACHE_FOLDER` (default: `cache/`):

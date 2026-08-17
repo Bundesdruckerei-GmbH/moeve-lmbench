@@ -15,6 +15,7 @@ dependencies = [
     "evaluate==0.4.6",
     "openai>=2.9.0",
     "ollama>=0.5.3",
+    "anthropic>=0.40.0",
     "pydantic>=2.9.2",
     "omegaconf>=2.3.0",
     "fastparquet>=2024.5.0",
@@ -23,7 +24,7 @@ dependencies = [
     "tiktoken>=0.12.0",
     "lxml>=5.3.0",
     "openpyxl>=3.1.5",
-    "transformers>=4.46.2",
+    "transformers>=4.46.2,<5",
     "ragas==0.4.3",
     "tenacity<9.1.5",
     "sentencepiece>=0.2.0",
@@ -31,6 +32,7 @@ dependencies = [
     "ecologits==0.8.2",
     "langchain-core>=0.3.74",
     "langchain-openai>=0.3.12",
+    "langchain-community<0.4.2",
     "fasttext>=0.9.3",
     "diskcache>=5.6.3",
     "sqlitedict>=2.1.0",
@@ -52,7 +54,7 @@ dev = [
     "notebook>=7.3.2",
     "pandas-stubs>=2.3.0.250703",
     "basedpyright>=1.36.1",
-    "scipy-stubs~=1.17.0",
+    "scipy-stubs~=1.18.0",
     "pytest-rerunfailures>=16.2",
 ]
 

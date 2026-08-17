@@ -52,7 +52,9 @@ def test_nans_in_aggregation():
 
 
 def test_nan_policy_omit_drops_nans():
-    """NanPolicy.OMIT aggregates only over non-NaN entries."""
+    """NanPolicy.OMIT aggregates only over non-NaN entries.
+
+    """
     scores = {
         "score": [0.4, np.nan, 0.6, np.nan],
     }
