@@ -1,3 +1,4 @@
+from math import nan
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -11,6 +12,7 @@ from lmbench.metrics.ragas_metrics import (
     RagasComparisonMetrics,
     RagasQAMetrics,
     RagasTopicExtractionMetrics,
+    _count_judge_failures,
     load_or_adapt_prompts_to_deutsch,
 )
 
@@ -63,6 +65,7 @@ def test_ragas_comparison_metrics():
         result = ragas_comparison_metrics.evaluate(["some output text"], ["some expected text"])
 
     assert "factual_correctness" in result.keys()
+    assert "factual_correctness_judge_failure_count" in result.keys()
 
 
 def test_ragas_qa_metrics():
@@ -95,6 +98,8 @@ def test_ragas_qa_metrics():
 
     assert "faithfulness" in result.keys()
     assert "noise_sensitivity_relevant" in result.keys()
+    assert "faithfulness_judge_failure_count" in result.keys()
+    assert "noise_sensitivity_relevant_judge_failure_count" in result.keys()
 
 
 def test_ragas_topic_extraction_metrics():
@@ -103,3 +108,19 @@ def test_ragas_topic_extraction_metrics():
         ragas_topic = RagasTopicExtractionMetrics()
         result = ragas_topic.evaluate(["economy, healthcare"], ["economy, healthcare"])
     assert "topic_match" in result.keys()
+    assert "topic_match_judge_failure_count" in result.keys()
+
+
+def test_count_judge_failures():
+    scores = {
+        "faithfulness": [0.9, nan, 0.5, nan],
+        "noise_sensitivity_relevant": [nan, 0.7, 0.8, 0.6],
+        "unrelated": [1.0, 1.0],
+    }
+
+    counts = _count_judge_failures(scores, ["faithfulness", "noise_sensitivity_relevant", "missing_key"])
+
+    assert counts == {
+        "faithfulness_judge_failure_count": 2,
+        "noise_sensitivity_relevant_judge_failure_count": 1,
+    }

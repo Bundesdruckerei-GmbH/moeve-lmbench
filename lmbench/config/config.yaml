@@ -6,8 +6,8 @@ output_folder: output
 resources_folder: resources
 retry:
   stop_after_attempt: 20
-  min_wait: 10
-  max_wait: 120
+  min_wait: 30
+  max_wait: 300
 judge_llm:
   provider: openai
   model: gpt-4o-mini

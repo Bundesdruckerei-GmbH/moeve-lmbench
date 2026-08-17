@@ -7,8 +7,9 @@ Additionally, initial configurations can be added to the generate_model_list() f
 """
 
 from lmbench.models.abstract import LLM
+from lmbench.models.anthropic import AnthropicLLM
 from lmbench.models.ollama import OllamaLLM
 from lmbench.models.openai import AzureOpenAILLM, OpenAILLM
 
-MODEL_LIST: list[type[LLM]] = [OllamaLLM, OpenAILLM, AzureOpenAILLM]
+MODEL_LIST: list[type[LLM]] = [OllamaLLM, OpenAILLM, AzureOpenAILLM, AnthropicLLM]
 MODEL_MAPPING: dict[str, type[LLM]] = {m.name(): m for m in MODEL_LIST}

@@ -21,10 +21,11 @@ class OpenAITokenizer(Tokenizer):
     def __init__(self, llm: "LLM"):
         super().__init__(llm)
 
-        # Fix for tiktoken not being updated for gpt-5.1
+        # tiktoken's prefix map only matches "gpt-5-", so the gpt-5.x family
+        # (gpt-5.1, gpt-5.4-nano, ...) is unmapped. They all use o200k_base.
         # https://github.com/openai/tiktoken/issues/464
-        if self.llm.model == "gpt-5.1":
-            self.tokenizer = tiktoken.encoding_for_model("gpt-5")
+        if self.llm.model.startswith("gpt-5"):
+            self.tokenizer = tiktoken.get_encoding("o200k_base")
             return
 
         self.tokenizer = tiktoken.encoding_for_model(self.llm.model)

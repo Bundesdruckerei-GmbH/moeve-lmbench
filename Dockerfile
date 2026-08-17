@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.3.0-devel-ubuntu22.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.3.1-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 

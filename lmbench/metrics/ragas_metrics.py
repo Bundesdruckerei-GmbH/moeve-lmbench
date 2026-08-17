@@ -9,26 +9,34 @@ LangchainLLMWrapper instance respectively.
 
 import asyncio  # noqa: I001
 import logging
+import math
+import os
 from math import nan
 from pathlib import Path
 from typing import Any, override
 
+# Disable RAGAS analytics before importing it. RAGAS 0.4.x makes a synchronous
+# requests.post() to t.explodinggradients.com from inside async LLM coroutines,
+# which blocks the event loop and stalls evaluations on networks where the
+# endpoint is unreachable (e.g. Azure ML compute).
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
+
 import openai
-from ragas import RunConfig, evaluate, DiskCacheBackend, EvaluationDataset, SingleTurnSample, experiment
+from ragas import DiskCacheBackend, EvaluationDataset, RunConfig, SingleTurnSample, evaluate, experiment
+from ragas.backends import InMemoryBackend
 from ragas.llms import LangchainLLMWrapper, llm_factory
 from ragas.metrics import FactualCorrectness, Faithfulness, NoiseSensitivity
 from ragas.metrics.collections import FactualCorrectness as FactualCorrectnessV2
-from ragas.backends import InMemoryBackend
 
 from datasets import Dataset as arrow_Dataset  # type: ignore
-from lmbench.config.config import CONFIG, JudgeLLMConfig, CACHE_FOLDER
+from lmbench.config.config import CACHE_FOLDER, CONFIG, JudgeLLMConfig
 from lmbench.dataset.abstract import Dataset
 from lmbench.dataset.dataframe import DataframeDataset
 from lmbench.metrics import Metric
 from lmbench.metrics.abstract import DatasetAwareMetric
+from lmbench.metrics.llm_judge_topic_extraction import TopicMatch
 from lmbench.task import Task
 from lmbench.utils import map_list_to_dict
-from lmbench.metrics.llm_judge_topic_extraction import TopicMatch
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,8 @@ def _create_langchain_llm(judge_config: JudgeLLMConfig):
     common: dict[str, Any] = {
         "seed": lm.seed if lm.seed is not None else 42,
         "temperature": lm.temperature if lm.temperature is not None else 0,
+        "timeout": 120,
+        "max_retries": 3,
     }
     if lm.top_p is not None:
         common["top_p"] = lm.top_p
@@ -147,6 +157,26 @@ def create_llm_v2(judge_config: JudgeLLMConfig):
     return llm_factory(**kwargs)
 
 
+def _count_judge_failures(scores: dict[str, list[float]], keys: list[str]) -> dict[str, int]:
+    """Return one `<key>_judge_failure_count` entry per requested sub-metric key.
+
+    Ragas silently returns NaN for samples where the judge LLM call failed; this helper
+    surfaces that count so it can be reported alongside the per-sample scores.
+
+    Args:
+        scores: Per-sample score lists keyed by sub-metric name.
+        keys: Sub-metric names to count NaNs for. Missing keys are skipped.
+
+    Returns:
+        A dict mapping `<key>_judge_failure_count` to the number of NaN entries.
+    """
+    return {
+        f"{key}_judge_failure_count": sum(1 for v in scores[key] if isinstance(v, float) and math.isnan(v))
+        for key in keys
+        if key in scores
+    }
+
+
 class RagasQAMetrics(DatasetAwareMetric):
     """
     Class using some of the metrics for RAG systems provided by Ragas for evaluating the generation step.
@@ -198,7 +228,9 @@ class RagasQAMetrics(DatasetAwareMetric):
             dataset=arrow_Dataset.from_pandas(eval_dataset),
             metrics=self.metrics,
             llm=self.llm,
-            run_config=RunConfig(max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt),
+            run_config=RunConfig(
+                max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt, timeout=300
+            ),
         )
 
         scores = map_list_to_dict(results.scores)  # type: ignore[reportAttributeAccessIssue]
@@ -206,6 +238,7 @@ class RagasQAMetrics(DatasetAwareMetric):
         if "noise_sensitivity(mode=relevant)" in scores:
             scores["noise_sensitivity_relevant"] = scores.pop("noise_sensitivity(mode=relevant)")
 
+        scores.update(_count_judge_failures(scores, ["faithfulness", "noise_sensitivity_relevant"]))  # type: ignore[reportArgumentType]
         return scores
 
 
@@ -244,7 +277,9 @@ class RagasComparisonMetrics(Metric):
             dataset=eval_dataset,
             metrics=self.metrics,
             llm=self.llm,
-            run_config=RunConfig(max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt),
+            run_config=RunConfig(
+                max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt, timeout=300
+            ),
         )
 
         scores = map_list_to_dict(results.scores)  # type: ignore[reportAttributeAccessIssue]
@@ -253,6 +288,7 @@ class RagasComparisonMetrics(Metric):
         if "factual_correctness(mode=f1)" in scores:
             scores["factual_correctness"] = scores.pop("factual_correctness(mode=f1)")
 
+        scores.update(_count_judge_failures(scores, ["factual_correctness"]))  # type: ignore[reportArgumentType]
         return scores
 
 
@@ -324,13 +360,17 @@ class RagasTopicExtractionMetrics(Metric):
             dataset=eval_dataset,
             metrics=self.metrics,
             llm=self.llm,
-            run_config=RunConfig(max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt),
+            run_config=RunConfig(
+                max_wait=CONFIG.retry.max_wait, max_retries=CONFIG.retry.stop_after_attempt, timeout=300
+            ),
         )
 
         scores = map_list_to_dict(results.scores)  # type: ignore[reportAttributeAccessIssue]
 
         if "topic_match(mode=f1)" in scores:
             scores["topic_match"] = scores.pop("topic_match(mode=f1)")
+
+        judge_failure_counts = _count_judge_failures(scores, ["topic_match"])
 
         words_factors = []
         topics_factors = []
@@ -354,6 +394,7 @@ class RagasTopicExtractionMetrics(Metric):
         scores["words_factor"] = words_factors
         scores["topic_differnce"] = topics_factors
         scores["structural_adherence"] = str_ad
+        scores.update(judge_failure_counts)  # type: ignore[reportArgumentType]
 
         return scores
 
@@ -419,4 +460,8 @@ class RagasComparisonMetricsV2(Metric):
         )
 
         # Convert to dict[str, list[float]] format expected by the Metric interface
-        return {"factual_correctness": experiment_result.to_pandas()["factual_correctness"].tolist()}
+        scores: dict[str, list[float]] = {
+            "factual_correctness": experiment_result.to_pandas()["factual_correctness"].tolist()
+        }
+        scores.update(_count_judge_failures(scores, ["factual_correctness"]))  # type: ignore[reportArgumentType]
+        return scores
