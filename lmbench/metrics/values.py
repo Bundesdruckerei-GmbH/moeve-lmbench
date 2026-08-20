@@ -4,6 +4,7 @@ import ast
 import json
 import logging
 import os
+import re
 from collections import Counter
 from enum import Enum
 from pathlib import Path
@@ -101,8 +102,8 @@ class ValuesMetric(DatasetAwareMetric):
         )
 
         # flatten MultiIndex into single-string identifiers
-        cleaned = pd.Index(normalized_sums.index.map(lambda tup: "_".join(tup))).str.replace(r"\s+", "_", regex=True)
-        normalized_sums.index = "stance_proportion_" + cleaned
+        cleaned = [re.sub(r"\s+", "_", "_".join(tup)) for tup in normalized_sums.index]
+        normalized_sums.index = pd.Index([f"stance_proportion_{name}" for name in cleaned])
 
         return normalized_sums.to_dict()  # type: ignore[reportReturnType]
 
@@ -287,8 +288,8 @@ class ValuesMetricBERT(DatasetAwareMetric):
         )
 
         # flatten MultiIndex into single-string identifiers
-        cleaned = pd.Index(normalized_sums.index.map(lambda tup: "_".join(tup))).str.replace(r"\s+", "_", regex=True)
-        normalized_sums.index = "stance_proportion_BERT_" + cleaned
+        cleaned = [re.sub(r"\s+", "_", "_".join(tup)) for tup in normalized_sums.index]
+        normalized_sums.index = pd.Index([f"stance_proportion_BERT_{name}" for name in cleaned])
 
         return normalized_sums.to_dict()  # type: ignore[reportReturnType]
 
