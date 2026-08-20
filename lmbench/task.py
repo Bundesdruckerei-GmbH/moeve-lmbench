@@ -19,3 +19,4 @@ class Task(str, enum.Enum):
     SEMANTICSIMILARITY = "semantic_similarity"
     POLITICAL_PARTIES = "political_parties"
     VALUE_EVALUATION = "value_evaluation"
+    HALLUCINATION = "hallucination"

@@ -1,6 +1,7 @@
 """The metric module that contains the metrics for every type of task."""
 
 from lmbench.metrics.abstract import Metric
+from lmbench.metrics.hallucination import HallucinationMetric
 from lmbench.metrics.hfevaluate import BLEU, ROUGE, BERTScore
 from lmbench.metrics.is_german import IsGerman
 from lmbench.metrics.match import Match
@@ -32,6 +33,7 @@ METRICS: list[type[Metric]] = [
     ValuesMetric,
     ValuesMetricBERT,
     PoliticalPartiesEvaluation,
+    HallucinationMetric,
 ]
 METRIC_MAPPING = {m.name: m for m in METRICS}
 

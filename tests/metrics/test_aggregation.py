@@ -54,6 +54,9 @@ def test_nans_in_aggregation():
 def test_nan_policy_omit_drops_nans():
     """NanPolicy.OMIT aggregates only over non-NaN entries.
 
+    Used by HallucinationMetric for sub-metrics that don't apply to every row
+    (e.g. factual_correctness is NaN for UNANSWERABLE rows). ZERO would
+    falsely deflate the mean by treating "not applicable" as 0.0.
     """
     scores = {
         "score": [0.4, np.nan, 0.6, np.nan],
