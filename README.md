@@ -1,6 +1,6 @@
 # <a href="https://moeve.bundesdruckerei.de/"><img src="docs/assets/moewe_bdr_rgb_72dpi.png" alt="MÖVE" height="26"/></a> MÖVE LMBench
 
-MÖVE LMBench is a benchmarking framework for evaluating Large Language Models across tasks like summarization, question answering, classification, and topic extraction, with metrics covering both task performance and governance criteria such as energy consumption and alignment with German constitutional values. Supported LLM providers include any OpenAI-compatible API (OpenAI, vLLM, LiteLLM, etc.), Azure OpenAI, and Ollama.
+MÖVE LMBench is a benchmarking framework for evaluating Large Language Models across tasks like summarization, question answering, classification, and topic extraction, with metrics covering both task performance and governance criteria such as hallucination tendencies, energy consumption, and alignment with German constitutional values. Supported LLM providers include any OpenAI-compatible API (OpenAI, vLLM, LiteLLM, etc.), Azure OpenAI, and Ollama.
 
 It is the evaluation component of **MÖVE** (*Modelle für die Öffentliche Verwaltung Evaluieren*), a benchmark tailored to the German public sector, which combines this framework with German-language datasets reflecting public-administration domains. Up-to-date MÖVE results are published at [moeve.bundesdruckerei.de](https://moeve.bundesdruckerei.de/).
 
@@ -76,11 +76,13 @@ The file `lmbench/config/config.yaml` holds default paths and settings. Most use
 
 ### Judge LLM
 
-Some metrics use a secondary LLM as a judge to evaluate outputs. The judge config in `config.yaml` covers LLM connection settings:
+Some metrics use a secondary LLM as a judge to evaluate outputs. Judge configs in `config.yaml` are split between LLM connection and metric-specific hyperparameters:
 
 - `judge_llm` — LLM used by ragas-based metrics (RagasQA, RagasComparison, RagasTopicExtraction) and the Values metric.
+- `hallucination_judge_llm` — LLM used by the Hallucination metric (dspy-based; same shape as `judge_llm`).
+- `hallucination` — non-LLM hyperparameters for the Hallucination metric (`judge_n` for multi-shot averaging, sub-metric weight dicts).
 
-The `api_key` field is resolved by [OmegaConf](https://omegaconf.readthedocs.io/) using `${oc.env:VAR}` syntax — point it at whichever environment variable holds your key.
+All judge LLM configs share the same shape. The `api_key` field is resolved by [OmegaConf](https://omegaconf.readthedocs.io/) using `${oc.env:VAR}` syntax — point it at whichever environment variable holds your key.
 
 **OpenAI (default):**
 
@@ -113,7 +115,25 @@ judge_llm:
   api_key: "${oc.env:AZURE_OPENAI_API_KEY}"
 ```
 
-If the judge LLM is misconfigured, ragas-based metrics log `Exception raised in Job[...]` lines at ERROR level and return NaN scores. If you see all-NaN scores or repeated error logs, check that the `judge_llm` config block is reachable.
+**Hallucination judge.** The metric works with any reasoning-capable judge; `gpt-5-mini` is a reasonable default. Generation parameters live under a nested `lm_args` block; the metric-side hyperparameters (`judge_n`, weight dicts) live in an optional `hallucination:` block with sensible Pydantic defaults — only add it if you want to override.
+
+```yaml
+hallucination_judge_llm:
+  provider: openai
+  model: gpt-5-mini
+  api_key: "${oc.env:OPENAI_API_KEY}"
+  lm_args:
+    temperature: 1.0
+    extra_body:
+      reasoning_effort: minimal
+
+# Optional — defaults are loaded from HallucinationConfig if this block is omitted.
+# hallucination:
+#   judge_n: 3                          # multi-shot judge sampling; enables variance tracking
+#   # answerable_weights / unanswerable_weights / conflicting_weights override the defaults if set
+```
+
+If the judge LLM is misconfigured, ragas-based metrics log `Exception raised in Job[...]` lines at ERROR level and return NaN scores; the hallucination metric raises the underlying error from dspy/litellm directly. If you see all-NaN scores or repeated error logs, check that the relevant judge config block (`judge_llm` or `hallucination_judge_llm`) is reachable.
 
 ### Experiment tracking (MLflow)
 
@@ -234,7 +254,11 @@ LMBench has two layers of cache, both under `CACHE_FOLDER` (default: `cache/`):
 - **Model-under-test generation cache** (`cache_v2.sqlite`) — caches responses from the LLM being evaluated.
   - `--no-cache` — disable for a run
   - `--clear-cache` — clear before running
-- **Judge LLM cache** (`cache/cache.db`, diskcache) — caches calls made by ragas-based metric judges, always on. There is currently no CLI flag to disable it. Remove the file manually to force a fresh run.
+- **Judge LLM cache** — caches calls made by metric judges, always on:
+  - ragas judge: `cache/cache.db` (diskcache)
+  - hallucination judge: `cache/dspy/` (dspy disk cache)
+
+  There is currently no CLI flag to disable the judge caches. Remove the files manually to force a fresh run.
 
 ## Testing
 

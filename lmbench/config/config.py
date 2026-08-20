@@ -35,8 +35,12 @@ class LMArgs(BaseModel):
 
 
 class JudgeLLMConfig(BaseModel):
-    """Configuration for an LLM used as a judge by metrics (ragas, values, etc.).
+    """Configuration for an LLM used as a judge by metrics (ragas, values, hallucination, etc.).
 
+    Connection/auth info lives at the top level; generation parameters live
+    under ``lm_args`` so the two concerns are visibly separated. ``lm_args``
+    is consumed by metrics that build a model-side client directly (currently
+    the hallucination metric via dspy); ragas/values metrics ignore it.
 
     Attributes:
         provider: The provider type: "openai" or "azure_openai".
@@ -86,6 +90,46 @@ class RetryConfig(BaseModel):
     max_wait: int
 
 
+class HallucinationConfig(BaseModel):
+    """Hallucination-metric-specific hyperparameters (not LLM-connection settings).
+
+    LLM connection/sampling settings live in ``JudgeLLMConfig`` (see
+    ``Config.hallucination_judge_llm``). This block carries only what is
+    meaningful for the metric's scoring logic.
+
+    Attributes:
+        judge_n: Number of judge samples per evaluated sub-metric (multi-shot averaging).
+            ``judge_n > 1`` additionally emits per-sub-metric variance diagnostics.
+        answerable_weights: Sub-metric weights used for ANSWERABLE rows.
+        unanswerable_weights: Sub-metric weights used for UNANSWERABLE rows.
+        conflicting_weights: Sub-metric weights used for CONFLICTING rows.
+    """
+
+    judge_n: int = 3
+    answerable_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "status_correctness": 0.20,
+            "factual_correctness": 0.30,
+            "document_f1": 0.30,
+            "context_groundedness": 0.20,
+        }
+    )
+    unanswerable_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "status_correctness": 0.30,
+            "refusal_quality": 0.40,
+            "knowledge_leakage": 0.30,
+        }
+    )
+    conflicting_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "status_correctness": 0.30,
+            "conflict_detection_quality": 0.40,
+            "document_f1": 0.30,
+        }
+    )
+
+
 class Config(BaseModel):
     """Config of LMBench.
 
@@ -109,6 +153,8 @@ class Config(BaseModel):
     resources_folder: str
     retry: RetryConfig
     judge_llm: JudgeLLMConfig
+    hallucination_judge_llm: JudgeLLMConfig | None = None
+    hallucination: HallucinationConfig = Field(default_factory=HallucinationConfig)
     semscore: SemScoreConfig
 
 
