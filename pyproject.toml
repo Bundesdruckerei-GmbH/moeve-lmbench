@@ -1,6 +1,6 @@
 [project]
 name = "lmbench"
-version = "0.2.0"
+version = "0.3.0"
 description = "A benchmarking tool for evaluating Large Language Models for use in the public sector."
 authors = [{ name = "BDR" }]
 license = "MIT"
