@@ -12,7 +12,8 @@ from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
 from lmbench.models.abstract import LLM
 from lmbench.models.data_models import LLMMessage, LLMOutput
-from lmbench.utils import context_size_eception_from_errormsg
+from lmbench.models.exceptions import ContentFilterException
+from lmbench.utils import bad_request_exception
 
 logger = logging.getLogger(__name__)
 
@@ -145,13 +146,15 @@ class OpenAILLM(LLM):
             )
             if should_disable_max_completion_tokens:
                 self._supports_max_completion_tokens = False
+            if response.choices and response.choices[0].finish_reason == "content_filter":
+                raise ContentFilterException(f"{self.model}: answer filtered")
             if len(response.choices) < 1 or response.choices[0].message.content is None:
                 logger.error("OpenAI Completion is empty!", messages)
                 return ""
 
             return message_to_llmoutput(response)
         except openai.BadRequestError as e:
-            raise context_size_eception_from_errormsg(e.message)
+            raise bad_request_exception(e.message)
 
 
 class AzureOpenAILLM(LLM):
@@ -209,10 +212,12 @@ class AzureOpenAILLM(LLM):
             if should_disable_max_completion_tokens:
                 self._supports_max_completion_tokens = False
 
+            if response.choices and response.choices[0].finish_reason == "content_filter":
+                raise ContentFilterException(f"{self.model}: answer filtered")
             if len(response.choices) < 1 or response.choices[0].message.content is None:
                 logger.error("OpenAI Completion is empty!", messages)
                 return ""
 
             return message_to_llmoutput(response)
         except openai.BadRequestError as e:
-            raise context_size_eception_from_errormsg(e.message)
+            raise bad_request_exception(e.message)

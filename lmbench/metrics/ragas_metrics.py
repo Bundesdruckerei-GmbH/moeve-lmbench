@@ -11,6 +11,7 @@ import asyncio  # noqa: I001
 import logging
 import math
 import os
+from dataclasses import dataclass, field
 from math import nan
 from pathlib import Path
 from typing import Any, override
@@ -34,7 +35,9 @@ from lmbench.dataset.abstract import Dataset
 from lmbench.dataset.dataframe import DataframeDataset
 from lmbench.metrics import Metric
 from lmbench.metrics.abstract import DatasetAwareMetric
+from lmbench.metrics.aggregate import NanPolicy
 from lmbench.metrics.llm_judge_topic_extraction import TopicMatch
+from lmbench.metrics.output_status import model_output_is_broken
 from lmbench.task import Task
 from lmbench.utils import map_list_to_dict
 
@@ -177,6 +180,72 @@ def _count_judge_failures(scores: dict[str, list[float]], keys: list[str]) -> di
     }
 
 
+def _relabel_model_broken(
+    scores: dict[str, list[float]],
+    keys: list[str],
+    model_output: list[str],
+    empty_answer_texts: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Flip NaN rows caused by broken model output to an explicit 0.0, in place.
+
+    Ragas returns NaN both when the judge failed and when the model answer was ungradable. An answer
+    is ungradable either by its text (empty, all-reasoning, marker leak -> model_output_is_broken) or
+    because the judge decomposed it into zero statements (its text is in empty_answer_texts); both are
+    the model's fault and become a real 0.0. Genuine judge failures keep their NaN and drop under OMIT.
+
+    Args:
+        scores: Per-sample score lists keyed by sub-metric name; mutated in place.
+        keys: Sub-metric names to relabel. Missing keys are skipped.
+        model_output: The model answers, aligned row-for-row with each score list.
+        empty_answer_texts: Model answers the judge decomposed into zero statements.
+    """
+    for key in keys:
+        if key not in scores:
+            continue
+        values = scores[key]
+        for i, value in enumerate(values):
+            if (
+                isinstance(value, float)
+                and math.isnan(value)
+                and (model_output_is_broken(model_output[i]) or model_output[i] in empty_answer_texts)
+            ):
+                values[i] = 0.0
+
+
+@dataclass
+class _FaithfulnessTracked(Faithfulness):
+    """Faithfulness that records model answers the judge decomposed into zero statements.
+
+    Such an answer is ungradable model output, not a judge failure: faithfulness returns NaN for it,
+    so its text is collected here to be relabelled to 0.0 instead of dropped.
+    """
+
+    empty_answer_texts: set[str] = field(default_factory=set)
+
+    async def _create_statements(self, row: dict[str, Any], callbacks: Any) -> Any:
+        output = await super()._create_statements(row, callbacks)
+        if not output.statements:
+            self.empty_answer_texts.add(row["response"])
+        return output
+
+
+@dataclass
+class _NoiseSensitivityTracked(NoiseSensitivity):
+    """NoiseSensitivity that records model answers the judge decomposed into zero statements.
+
+    Same ungradable-output signal as _FaithfulnessTracked; an empty statement list makes
+    noise-sensitivity average over an empty array and return NaN.
+    """
+
+    empty_answer_texts: set[str] = field(default_factory=set)
+
+    async def _decompose_answer_into_statements(self, text: str, question: str, callbacks: Any) -> list[str]:
+        statements = await super()._decompose_answer_into_statements(text, question, callbacks)
+        if not statements:
+            self.empty_answer_texts.add(text)
+        return statements
+
+
 class RagasQAMetrics(DatasetAwareMetric):
     """
     Class using some of the metrics for RAG systems provided by Ragas for evaluating the generation step.
@@ -188,6 +257,9 @@ class RagasQAMetrics(DatasetAwareMetric):
 
     name = "RagasQA"
     tasks: list[Task] = [Task.QUESTION_ANSWERING]
+    judge_llm_config: str | None = "judge_llm"
+    # OMIT so genuine judge-failure NaNs drop; model-broken rows are relabelled to 0.0 first.
+    nan_policy = NanPolicy.OMIT
 
     @override
     def description(self) -> str:
@@ -202,10 +274,9 @@ class RagasQAMetrics(DatasetAwareMetric):
 
         self.llm = create_llm_wrapper(CONFIG.judge_llm)
 
-        self.metrics = [
-            NoiseSensitivity(),
-            Faithfulness(),
-        ]
+        self._noise = _NoiseSensitivityTracked()
+        self._faithfulness = _FaithfulnessTracked()
+        self.metrics = [self._noise, self._faithfulness]
 
         load_or_adapt_prompts_to_deutsch(self.metrics)
 
@@ -238,6 +309,8 @@ class RagasQAMetrics(DatasetAwareMetric):
         if "noise_sensitivity(mode=relevant)" in scores:
             scores["noise_sensitivity_relevant"] = scores.pop("noise_sensitivity(mode=relevant)")
 
+        empty_answers = self._noise.empty_answer_texts | self._faithfulness.empty_answer_texts
+        _relabel_model_broken(scores, ["faithfulness", "noise_sensitivity_relevant"], model_output, empty_answers)  # type: ignore[reportArgumentType]
         scores.update(_count_judge_failures(scores, ["faithfulness", "noise_sensitivity_relevant"]))  # type: ignore[reportArgumentType]
         return scores
 
@@ -252,6 +325,11 @@ class RagasComparisonMetrics(Metric):
 
     name = "RagasComparison"
     tasks: list[Task] = [Task.QUESTION_ANSWERING, Task.SUMMARIZATION]
+    judge_llm_config: str | None = "judge_llm"
+    # OMIT so a judge-failure NaN drops instead of scoring the model 0; model-broken output is
+    # relabelled to 0.0 first. Broken output already floors to 0.0, so historical numbers are
+    # unchanged under fillna(0); a judge failure is the only case this moves.
+    nan_policy = NanPolicy.OMIT
 
     @override
     def description(self) -> str:
@@ -288,6 +366,9 @@ class RagasComparisonMetrics(Metric):
         if "factual_correctness(mode=f1)" in scores:
             scores["factual_correctness"] = scores.pop("factual_correctness(mode=f1)")
 
+        # Broken output already floors to 0.0 here, so relabel rarely fires; it stays for uniform
+        # disposition. Under OMIT the case that matters is a genuine judge-failure NaN, which now drops.
+        _relabel_model_broken(scores, ["factual_correctness"], model_output)  # type: ignore[reportArgumentType]
         scores.update(_count_judge_failures(scores, ["factual_correctness"]))  # type: ignore[reportArgumentType]
         return scores
 
@@ -297,6 +378,11 @@ class RagasTopicExtractionMetrics(Metric):
 
     name = "RagasTopicExtraction"
     tasks: list[Task] = [Task.TOPIC_EXTRACTION]
+    judge_llm_config: str | None = "judge_llm"
+    # OMIT so a judge-failure NaN drops instead of scoring the model 0. Broken output floors topic_match
+    # to 0.0, so no relabel is needed and history stays reproducible under fillna(0). The derived columns
+    # (words_factor, topic_differnce, structural_adherence) share the NaN and drop with it, as intended.
+    nan_policy = NanPolicy.OMIT
 
     @override
     def description(self) -> str:
@@ -425,6 +511,9 @@ class RagasComparisonMetricsV2(Metric):
 
     name = "RagasComparisonV2"
     tasks: list[Task] = [Task.QUESTION_ANSWERING, Task.SUMMARIZATION]
+    judge_llm_config: str | None = "judge_llm"
+    # OMIT, matching RagasComparisonMetrics: judge-failure NaN drops, model-broken output stays 0.0.
+    nan_policy = NanPolicy.OMIT
 
     @override
     def description(self) -> str:
@@ -463,5 +552,7 @@ class RagasComparisonMetricsV2(Metric):
         scores: dict[str, list[float]] = {
             "factual_correctness": experiment_result.to_pandas()["factual_correctness"].tolist()
         }
+        # See RagasComparisonMetrics.evaluate: relabel broken output to 0.0, judge-failure NaN drops under OMIT.
+        _relabel_model_broken(scores, ["factual_correctness"], model_output)
         scores.update(_count_judge_failures(scores, ["factual_correctness"]))  # type: ignore[reportArgumentType]
         return scores

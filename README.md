@@ -209,7 +209,8 @@ These are 10-row samples for testing. See the `LICENSE` file in each dataset fol
 ### Adding your own dataset
 
 1. Create a folder under `datasets/` with your dataset name
-2. Add a `dataset.parquet` file with your data
+2. Add a `dataset.parquet` file with your data and an `item_id` column holding a stable, unique id per row
+   (e.g. `my-dataset:0`, `my-dataset:1`, ...). Per-item scores are keyed on it, so don't renumber it later.
 3. Add a `config.yaml`:
    ```yaml
    task: summarization  # or: question_answering, classification, topic_extraction

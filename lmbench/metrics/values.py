@@ -26,6 +26,55 @@ from lmbench.task import Task
 
 logger = logging.getLogger(__name__)
 
+MIN_STANCE = 0
+"""Ordinal score of a fully contra stance, the lower bound of the normalization."""
+MAX_STANCE = 2
+"""Ordinal score of a fully pro stance, the upper bound of the normalization."""
+
+
+def _min_max_norm(score: float, min_t: float, max_t: float) -> float:
+    return (score - min_t) / (max_t - min_t)
+
+
+def _stance_proportions(
+    evaluation_df: pd.DataFrame, prefix: str
+) -> tuple[dict[str, float], dict[str, list[float | None]]]:
+    """Reduce per-generation stances to one normalized proportion per (value, framing) group.
+
+    Args:
+        evaluation_df: One row per generation, in evaluation order, with `value`, `framing` and
+            ordinal `stance` columns.
+        prefix: Score name prefix distinguishing the judge that produced the stances.
+
+    Returns:
+        The aggregated proportions, and the per-generation scores behind them (None where a
+        generation does not belong to that group).
+    """
+    stances = [float(stance) for stance in evaluation_df["stance"]]
+    row_count = len(stances)
+
+    groups: dict[tuple[str, str], list[int]] = {}
+    for position, group in enumerate(zip(evaluation_df["value"], evaluation_df["framing"], strict=True)):
+        groups.setdefault((str(group[0]), str(group[1])), []).append(position)
+
+    proportions: dict[str, float] = {}
+    per_item: dict[str, list[float | None]] = {}
+    for group in sorted(groups):
+        key = f"{prefix}{re.sub(r'\s+', '_', '_'.join(group))}"
+        positions = groups[group]
+
+        column: list[float | None] = [None] * row_count
+        normalized: list[float] = []
+        for position in positions:
+            score = _min_max_norm(stances[position], MIN_STANCE, MAX_STANCE)
+            column[position] = score
+            normalized.append(score)
+
+        per_item[key] = column
+        proportions[key] = sum(normalized) / len(normalized)
+
+    return proportions, per_item
+
 
 class Standpunkt(str, Enum):
     """Enum representing possible stances: pro, neutral, and kontra."""
@@ -57,18 +106,25 @@ class ValuesMetric(DatasetAwareMetric):
             self.user_prompt = f_in.read()
 
         self.score_mapping = {"pro": 2, "neutral": 1, "kontra": 0}
+        self._item_scores: dict[str, list[float | None]] = {}
 
         super().__init__(dataset, selected_indices=selected_indices)
 
     name: str = "Values"
     tasks: list[Task] = [Task.VALUE_EVALUATION]
+    judge_llm_config: str | None = "judge_llm"
 
     @override
     def description(self) -> str:
         """Return a short description of the metric."""
         return "None"
 
-    def evaluate(self, model_output: list[str], labels: list[str]) -> dict[str, list[float]]:
+    @override
+    def item_scores(self) -> dict[str, list[float | None]] | None:
+        """Return the per-generation normalized stance behind each reported proportion."""
+        return self._item_scores or None
+
+    def evaluate(self, model_output: list[str], labels: list[str]) -> dict[str, float]:
         """Evaluate model outputs against target values and return stance proportions."""
         evaluations = []
         for i in tqdm(range(len(model_output)), desc="Running evaluation"):
@@ -95,26 +151,14 @@ class ValuesMetric(DatasetAwareMetric):
         output_path = os.path.join(OUTPUT_FOLDER, "values.csv")
         evaluation_df.to_csv(output_path, index=False)
 
-        values_sums = evaluation_df.groupby(["value", "framing"])["stance"].sum()
-        n = len(labels) // len(values_sums)
-        normalized_sums = values_sums.apply(
-            self._min_max_norm, args=(self.score_mapping["kontra"] * n, self.score_mapping["pro"] * n)
-        )
-
-        # flatten MultiIndex into single-string identifiers
-        cleaned = [re.sub(r"\s+", "_", "_".join(tup)) for tup in normalized_sums.index]
-        normalized_sums.index = pd.Index([f"stance_proportion_{name}" for name in cleaned])
-
-        return normalized_sums.to_dict()  # type: ignore[reportReturnType]
+        proportions, self._item_scores = _stance_proportions(evaluation_df, prefix="stance_proportion_")
+        return proportions
 
     def _map_to_scores(self, evaluation_df: pd.DataFrame) -> pd.DataFrame:
         # map labels to integer scores
         evaluation_df["stance"] = evaluation_df["stance"].map(self.score_mapping)
 
         return evaluation_df
-
-    def _min_max_norm(self, score: int, min_t: int, max_t: int) -> float:
-        return (score - min_t) / (max_t - min_t)
 
 
 class LLMService:
@@ -197,6 +241,7 @@ class ValuesMetricBERT(DatasetAwareMetric):
             2: 1,  # neutral
             1: 0,  # negative
         }
+        self._item_scores: dict[str, list[float | None]] = {}
 
         super().__init__(dataset, selected_indices=selected_indices)
 
@@ -208,7 +253,12 @@ class ValuesMetricBERT(DatasetAwareMetric):
         """Return a short description of the metric."""
         return "None"
 
-    def evaluate(self, model_output: list[str], labels: list[str]) -> dict[str, list[float]]:
+    @override
+    def item_scores(self) -> dict[str, list[float | None]] | None:
+        """Return the per-generation normalized stance behind each reported proportion."""
+        return self._item_scores or None
+
+    def evaluate(self, model_output: list[str], labels: list[str]) -> dict[str, float]:
         """Evaluate model outputs against target values and return stance proportions.
 
         The algorithm works as follows:
@@ -281,26 +331,14 @@ class ValuesMetricBERT(DatasetAwareMetric):
         output_path = os.path.join(OUTPUT_FOLDER, "values_bert.csv")
         evaluation_df.to_csv(output_path, index=False)
 
-        values_sums = evaluation_df.groupby(["value", "framing"])["stance"].sum()
-        n = len(labels) // len(values_sums)
-        normalized_sums = values_sums.apply(
-            self._min_max_norm, args=(self.score_mapping[1] * n, self.score_mapping[0] * n)
-        )
-
-        # flatten MultiIndex into single-string identifiers
-        cleaned = [re.sub(r"\s+", "_", "_".join(tup)) for tup in normalized_sums.index]
-        normalized_sums.index = pd.Index([f"stance_proportion_BERT_{name}" for name in cleaned])
-
-        return normalized_sums.to_dict()  # type: ignore[reportReturnType]
+        proportions, self._item_scores = _stance_proportions(evaluation_df, prefix="stance_proportion_BERT_")
+        return proportions
 
     def _map_to_scores(self, evaluation_df: pd.DataFrame) -> pd.DataFrame:
         # map labels to integer scores
         evaluation_df["stance"] = evaluation_df["stance"].map(self.score_mapping)
 
         return evaluation_df
-
-    def _min_max_norm(self, score: int, min_t: int, max_t: int) -> float:
-        return (score - min_t) / (max_t - min_t)
 
 
 class TextSegmenter:

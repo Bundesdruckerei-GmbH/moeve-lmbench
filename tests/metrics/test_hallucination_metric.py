@@ -1,15 +1,35 @@
 from types import SimpleNamespace
 
 import pytest
-from dspy.utils.exceptions import AdapterParseError
+from dspy.utils.exceptions import AdapterParseError, LMRateLimitError
 
+from lmbench.config.config import CONFIG
 from lmbench.metrics.hallucination import (
-    JUDGE_PARSE_RETRIES,
-    ClaimExtractionSignature,
+    _PUBLISHED_SCORE_KEY,
+    COMPOSITE_SCORE,
     HallucinationMetric,
-    HarmonyUnwrappingJSONAdapter,
-    call_judge_n,
 )
+from lmbench.metrics.judge.claims import ClaimExtractionSignature
+
+
+def test_every_scored_sub_score_has_a_published_name():
+    """Scoring names and published names are declared apart; they must stay in step."""
+    scored = {key for keys in HallucinationMetric.APPLICABLE_SCORES.values() for key in keys}
+    assert set(_PUBLISHED_SCORE_KEY) == scored | {COMPOSITE_SCORE}
+
+
+def test_published_score_names_are_the_ones_the_run_archive_uses():
+    """These names are the output columns of every archived run; renaming one breaks comparability."""
+    assert set(_PUBLISHED_SCORE_KEY.values()) == {
+        "hallucination_benchmark_score",
+        "status_accuracy",
+        "factual_correctness",
+        "reference_f1",
+        "context_groundedness",
+        "refusal_quality",
+        "knowledge_leakage_avoidance",
+        "conflict_handling",
+    }
 
 
 class DummyDataset:
@@ -40,12 +60,12 @@ class RecordingEvaluator:
         return SimpleNamespace(score=self.score, judge_score_variance=0.0)
 
 
-def _build_metric(dataset: DummyDataset, weights: dict[str, dict[str, float]]) -> HallucinationMetric:
+def _build_metric(dataset: DummyDataset, weights: dict[str, dict[str, float]], judge_n: int = 1) -> HallucinationMetric:
     metric = HallucinationMetric.__new__(HallucinationMetric)
     metric.dataset = dataset
     metric.selected_indices = [2]
     metric.config = SimpleNamespace(
-        judge_n=1,
+        judge_n=judge_n,
         answerable_weights=weights.get("answerable", {}),
         unanswerable_weights=weights.get("unanswerable", {}),
         conflicting_weights=weights.get("conflicting", {}),
@@ -58,6 +78,25 @@ def _build_metric(dataset: DummyDataset, weights: dict[str, dict[str, float]]) -
     metric._knowledge_leakage = RecordingEvaluator()
     metric._conflict_detection_quality = RecordingEvaluator()
     return metric
+
+
+def test_weight_keys_outside_the_question_type_are_rejected():
+    """A weight the branch never scores would silently drag every composite of that type down."""
+    metric = _build_metric(DummyDataset(), {"answerable": {"refusal_quality": 0.4}})
+    with pytest.raises(ValueError, match="not scored for ANSWERABLE"):
+        metric._check_weight_keys()
+
+
+def test_the_retired_weight_name_is_rejected_rather_than_silently_ignored():
+    metric = _build_metric(DummyDataset(), {"unanswerable": {"knowledge_leakage": 0.3}})
+    with pytest.raises(ValueError, match="knowledge_leakage_avoidance"):
+        metric._check_weight_keys()
+
+
+def test_default_weights_name_only_sub_scores_their_question_type_scores():
+    metric = _build_metric(DummyDataset(), {})
+    metric.config = CONFIG.hallucination
+    metric._check_weight_keys()
 
 
 def _patch_parser(monkeypatch, status: str) -> None:
@@ -99,7 +138,7 @@ def test_hallucination_metric_unanswerable_routing(monkeypatch):
             "unanswerable": {
                 "status_correctness": 0.3,
                 "refusal_quality": 0.4,
-                "knowledge_leakage": 0.3,
+                "knowledge_leakage_avoidance": 0.3,
             },
             "conflicting": {"status_correctness": 1.0},
         },
@@ -178,141 +217,67 @@ def test_hallucination_metric_parse_error_does_not_crash():
 
 
 def _parse_error() -> AdapterParseError:
-    return AdapterParseError(
-        adapter_name="TestAdapter",
-        signature=ClaimExtractionSignature,
-        lm_response="<malformed>",
+    return AdapterParseError(adapter_name="TestAdapter", signature=ClaimExtractionSignature, lm_response="<malformed>")
+
+
+class _FailingEvaluator:
+    """Sub-evaluator stub that always fails the way an exhausted judge does."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def __call__(self, **kwargs) -> SimpleNamespace:  # noqa: ARG002
+        raise self.error
+
+
+def test_item_statuses_leave_inapplicable_dimensions_unset(monkeypatch):
+    """A CONFLICTING row is not scored on factual correctness, so that dimension has no status."""
+    dataset = DummyDataset(question_types=["ANSWERABLE", "ANSWERABLE", "CONFLICTING"])
+    metric = _build_metric(
+        dataset,
+        weights={
+            "answerable": {"status_correctness": 1.0},
+            "unanswerable": {"status_correctness": 1.0},
+            "conflicting": {"status_correctness": 0.5, "conflict_detection_quality": 0.5},
+        },
     )
+    _patch_parser(monkeypatch, "CONFLICTING")
+
+    metric.evaluate(["model-response"], ["ga-c"])
+
+    statuses = metric.item_statuses()
+    assert statuses is not None
+    assert statuses["status_accuracy"] == ["ok"]
+    assert statuses["conflict_handling"] == ["ok"]
+    assert statuses["reference_f1"] == ["ok"]
+    assert statuses["hallucination_benchmark_score"] == ["ok"]
+    # Dimensions this question type does not score are NaN by design, not judge failures.
+    assert statuses["factual_correctness"] == [None]
+    assert statuses["context_groundedness"] == [None]
+    assert statuses["refusal_quality"] == [None]
+    assert statuses["knowledge_leakage_avoidance"] == [None]
 
 
-class _ScriptedEvaluator:
-    """Mock dspy module that records calls and follows a scripted failure pattern."""
+@pytest.mark.parametrize(
+    "error",
+    [_parse_error(), LMRateLimitError("429")],
+    ids=["unparseable answer", "API error after retries"],
+)
+def test_item_statuses_report_a_judge_failure(monkeypatch, error):
+    dataset = DummyDataset(question_types=["ANSWERABLE", "ANSWERABLE", "ANSWERABLE"])
+    metric = _build_metric(
+        dataset,
+        weights={"answerable": {"status_correctness": 1.0}, "unanswerable": {}, "conflicting": {}},
+    )
+    metric._factual_correctness = _FailingEvaluator(error)
+    _patch_parser(monkeypatch, "ANSWERABLE")
 
-    def __init__(self, failure_pattern: list[bool] | None = None, default_failure: bool = False) -> None:
-        self.calls: list[dict] = []
-        self.failure_pattern = failure_pattern or []
-        self.default_failure = default_failure
+    metric.evaluate(["model-response"], ["ga-c"])
 
-    def __call__(self, **kwargs) -> SimpleNamespace:
-        self.calls.append(kwargs)
-        idx = len(self.calls) - 1
-        should_fail = self.failure_pattern[idx] if idx < len(self.failure_pattern) else self.default_failure
-        if should_fail:
-            raise _parse_error()
-        return SimpleNamespace(score=1.0, verdicts=[True])
-
-
-def test_call_judge_n_single_shot_success_first_try():
-    """n=1, first attempt succeeds → returns one result, no config override passed."""
-    evaluator = _ScriptedEvaluator()
-    results = call_judge_n(evaluator, n=1, temperature=0.0, x="hello")
-    assert len(results) == 1
-    assert len(evaluator.calls) == 1
-    # First-attempt single-shot does NOT pass a per-call config override.
-    assert "config" not in evaluator.calls[0]
-    assert evaluator.calls[0]["x"] == "hello"
-
-
-def test_call_judge_n_single_shot_retry_then_success():
-    """n=1, first two attempts fail then third succeeds → returns one result, three calls."""
-    evaluator = _ScriptedEvaluator(failure_pattern=[True, True, False])
-    results = call_judge_n(evaluator, n=1, temperature=0.0, x="hello")
-    assert len(results) == 1
-    assert len(evaluator.calls) == 3
-    # First call: no override.
-    assert "config" not in evaluator.calls[0]
-    # Retries: distinct rollout_ids, temperature clamped to ≥1.0 (since rollout_id is None mode).
-    assert evaluator.calls[1]["config"] == {"rollout_id": 1, "temperature": 1.0}
-    assert evaluator.calls[2]["config"] == {"rollout_id": 2, "temperature": 1.0}
-
-
-def test_call_judge_n_single_shot_all_attempts_fail_reraises():
-    """n=1, all attempts fail → original AdapterParseError propagates."""
-    evaluator = _ScriptedEvaluator(default_failure=True)
-    with pytest.raises(AdapterParseError):
-        call_judge_n(evaluator, n=1, temperature=0.0, x="hello")
-    assert len(evaluator.calls) == JUDGE_PARSE_RETRIES + 1
-
-
-def test_call_judge_n_multi_shot_all_succeed():
-    """n=3, all shots succeed first try → 3 results, spaced rollout_ids, no overlaps."""
-    evaluator = _ScriptedEvaluator()
-    results = call_judge_n(evaluator, n=3, temperature=1.0, x="hello")
-    assert len(results) == 3
-    assert len(evaluator.calls) == 3
-    rollout_ids = [call["config"]["rollout_id"] for call in evaluator.calls]
-    # Spacing is shot * (JUDGE_PARSE_RETRIES + 1); with JUDGE_PARSE_RETRIES=2 → 0, 3, 6.
-    assert rollout_ids == [shot * (JUDGE_PARSE_RETRIES + 1) for shot in range(3)]
-
-
-def test_call_judge_n_multi_shot_passes_temperature_through_unclamped():
-    """Multi-shot uses the caller's temperature verbatim (no max() clamp)."""
-    evaluator = _ScriptedEvaluator()
-    call_judge_n(evaluator, n=3, temperature=0.5, x="hello")
-    for call in evaluator.calls:
-        assert call["config"]["temperature"] == 0.5
-
-
-def test_call_judge_n_multi_shot_partial_failure_drops_failed_shots():
-    """n=3, middle shot fails all 3 attempts → returns 2 surviving results."""
-    # Pattern: shot 0 success (1 call), shot 1 fails all 3 attempts (3 calls), shot 2 success (1 call).
-    evaluator = _ScriptedEvaluator(failure_pattern=[False, True, True, True, False])
-    results = call_judge_n(evaluator, n=3, temperature=1.0, x="hello")
-    assert len(results) == 2  # only the two surviving shots
-    assert len(evaluator.calls) == 5
-
-
-def test_call_judge_n_multi_shot_all_shots_fail_reraises():
-    """n=3, every shot fails all attempts → re-raises after exhausting all budgets."""
-    evaluator = _ScriptedEvaluator(default_failure=True)
-    with pytest.raises(AdapterParseError):
-        call_judge_n(evaluator, n=3, temperature=1.0, x="hello")
-    # 3 shots × (JUDGE_PARSE_RETRIES + 1) attempts each.
-    assert len(evaluator.calls) == 3 * (JUDGE_PARSE_RETRIES + 1)
-
-
-def test_call_judge_n_rollout_ids_distinct_across_shots_and_retries():
-    """Spaced rollout_id allocation guarantees no cache-key collisions across shots."""
-    # Each shot fails twice then succeeds. JUDGE_PARSE_RETRIES=2 → 3 attempts per shot.
-    evaluator = _ScriptedEvaluator(failure_pattern=[True, True, False] * 3)
-    results = call_judge_n(evaluator, n=3, temperature=1.0, x="hello")
-    assert len(results) == 3
-    assert len(evaluator.calls) == 9
-    rollout_ids = [call["config"]["rollout_id"] for call in evaluator.calls]
-    # Shot 0: 0, 1, 2  | Shot 1: 3, 4, 5  | Shot 2: 6, 7, 8
-    assert rollout_ids == list(range(9))
-    assert len(set(rollout_ids)) == 9  # no collisions
-
-
-def test_harmony_unwrap_strips_final_envelope():
-    wrapped = '{"final": "{\\"reasoning\\": \\"all good\\", \\"verdicts\\": [true, false]}"}'
-    expected_inner = '{"reasoning": "all good", "verdicts": [true, false]}'
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony(wrapped) == expected_inner
-
-
-def test_harmony_unwrap_passes_through_bare_json():
-    """Normal dspy output (no envelope) must be returned unchanged."""
-    bare = '{"reasoning": "all good", "verdicts": [true, false]}'
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony(bare) == bare
-
-
-def test_harmony_unwrap_passes_through_empty_string():
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony("") == ""
-
-
-def test_harmony_unwrap_passes_through_malformed_json():
-    """Non-JSON or truncated responses must not raise — adapter's parse() will report it."""
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony("not json at all {") == "not json at all {"
-
-
-def test_harmony_unwrap_strips_final_envelope_dict_variant():
-    """Foundry also emits {"final": {<object>}} — re-serialize the inner object to JSON."""
-    wrapped = '{"final": {"verdicts": [true, false, true]}}'
-    expected_inner = '{"verdicts": [true, false, true]}'
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony(wrapped) == expected_inner
-
-
-def test_harmony_unwrap_ignores_envelopes_with_extra_keys():
-    """Only the strict single-key {final: ...} envelope is unwrapped."""
-    other = '{"final": "x", "extra": "y"}'
-    assert HarmonyUnwrappingJSONAdapter._unwrap_harmony(other) == other
+    statuses = metric.item_statuses()
+    assert statuses is not None
+    # The row aborts before any sub-score lands, including the ones evaluated earlier in the branch.
+    assert statuses["factual_correctness"] == ["judge_failed"]
+    assert statuses["hallucination_benchmark_score"] == ["judge_failed"]
+    # Not applicable to ANSWERABLE, so still unset rather than failed.
+    assert statuses["refusal_quality"] == [None]

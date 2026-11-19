@@ -158,6 +158,16 @@ def main():
         default=[],
         help="Comma-separated list of zero-based dataset rows or ranges to omit (e.g. 3,7-10,425).",
     )
+    parser.add_argument(
+        "--log-run-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Upload output.csv, metrics.json and selected_indices.json to MLflow alongside the "
+            "per-item score artifact, which is always uploaded. The output folder is overwritten by "
+            "the next run, so this is what makes a run's results outlive it."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -181,14 +191,12 @@ def main():
     # if dataset requests multiple iterations, wrap it
     n_iter = dataset.config_dict.get("n_iterations", 1)
     if n_iter > 1:
-        if not args.no_cache:
-            parser.error("Datasets with n_iterations > 1 require --no-cache. Please rerun with --no-cache.")
-        if args.temperature is None or args.temperature <= 0:
-            parser.error(
-                "Datasets with n_iterations > 1 require --temperature > 0. Please rerun with --temperature <value>."
-            )
+        if args.temperature is not None and args.temperature <= 0:
+            parser.error("Datasets with n_iterations > 1 need varying samples; do not pass --temperature <= 0.")
+        if args.temperature is None:
+            logger.info("No temperature sent: the samples use the provider's default temperature.")
         dataset = MultiIterationDataset(dataset, n_iter)
-        logger.info("Multi-iteration dataset used; cache has been disabled by user.")
+        logger.info(f"Multi-iteration dataset used: {n_iter} samples per item, cached per sample.")
 
     # Set the task tag for the current run in MLflow. More tags can be added here as needed.
     mlflow.set_tag("task", dataset.task.value)
@@ -199,6 +207,7 @@ def main():
         dataset,
         limit=args.limit,
         excluded_indices=args.exclude_rows,
+        log_run_artifacts=args.log_run_artifacts,
     )
     if args.no_cache:
         logger.info("Not using cache in this run.")

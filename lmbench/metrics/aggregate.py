@@ -36,6 +36,11 @@ aggregation_map: dict[AggregationType, Callable[[list[float]], float]] = {
 }
 
 
+def is_metadata_sequence(values: list) -> bool:
+    """Return True if the list carries text, i.e. per-row metadata (e.g. ``attack_type``) rather than scores."""
+    return any(isinstance(v, str) for v in values)
+
+
 def aggregate(
     scores: dict[str, list[float] | float],
     aggregations: list[AggregationType] | None = None,
@@ -69,6 +74,9 @@ def aggregate(
     for key in scores.keys():
         value = scores[key]
         if isinstance(value, list):
+            # Skip non-numeric (metadata) lists: they are echoed per row for analysis but have no mean or median.
+            if is_metadata_sequence(value):
+                continue
             if nan_policy == NanPolicy.OMIT:
                 clean: list[float] = [v for v in value if not (isinstance(v, float) and np.isnan(v))]
             else:
@@ -76,7 +84,7 @@ def aggregate(
                 clean = [0.0 if isinstance(v, float) and np.isnan(v) else v for v in value]
             # Aggregate each value using the specified aggregation types
             for aggregation in aggregations:
-                result[f"{key}:{aggregation.value}"] = aggregation_map[aggregation](clean)
+                result[f"{key}:{aggregation.value}"] = aggregation_map[aggregation](clean) if clean else np.nan
         else:
             # If it's a single value, just copy it over
             result[key] = value

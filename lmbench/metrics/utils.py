@@ -2,6 +2,9 @@
 
 import logging
 import re
+from collections import Counter
+from statistics import median, pvariance
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -39,3 +42,36 @@ def parse_llm_label(raw: str, num_classes: int) -> tuple[int | None, bool]:
     # fallback
     logging.warning("Unrecognised answer %r – skipped", raw)
     return None, True
+
+
+def clamp01(value: Any, default: float = 0.0) -> float:
+    """Convert a value to float and clamp it into the unit interval."""
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def f1_score(precision: float, recall: float) -> float:
+    """Compute F1 from precision and recall."""
+    return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+
+def majority_bool(values: list[bool]) -> bool:
+    """Return the most common boolean value."""
+    return Counter(values).most_common(1)[0][0]
+
+
+def median_score(scores: list[float]) -> float:
+    """Return the median score as a float."""
+    return float(median(scores)) if scores else 0.0
+
+
+def score_variance(scores: list[float]) -> float:
+    """Return the population variance for repeated scores."""
+    return float(pvariance(scores)) if len(scores) > 1 else 0.0
+
+
+def closest_index(scores: list[float], target: float) -> int:
+    """Return the index of the score closest to target."""
+    return min(range(len(scores)), key=lambda idx: abs(scores[idx] - target))

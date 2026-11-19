@@ -1,10 +1,12 @@
-from math import nan
+import asyncio
+from math import isnan, nan
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from langchain_core.outputs import Generation, LLMResult
 from ragas.llms.base import BaseRagasLLM
 from ragas.metrics import NoiseSensitivity
+from ragas.metrics._faithfulness import StatementGeneratorOutput
 from ragas.run_config import RunConfig
 
 from lmbench.dataset.dataframe import DataframeDataset, DataframeDatasetConfig
@@ -13,6 +15,9 @@ from lmbench.metrics.ragas_metrics import (
     RagasQAMetrics,
     RagasTopicExtractionMetrics,
     _count_judge_failures,
+    _FaithfulnessTracked,
+    _NoiseSensitivityTracked,
+    _relabel_model_broken,
     load_or_adapt_prompts_to_deutsch,
 )
 
@@ -124,3 +129,68 @@ def test_count_judge_failures():
         "faithfulness_judge_failure_count": 2,
         "noise_sensitivity_relevant_judge_failure_count": 1,
     }
+
+
+def test_relabel_model_broken():
+    scores = {
+        "faithfulness": [0.9, nan, nan, 0.0],
+    }
+    # row 1: usable answer -> stays NaN (judge failure, dropped under OMIT)
+    # row 2: empty answer -> relabelled to 0.0 (model's fault)
+    model_output = ["a fine answer", "another fine answer", "   ", "yet another answer"]
+
+    _relabel_model_broken(scores, ["faithfulness", "missing_key"], model_output)
+
+    assert scores["faithfulness"][0] == 0.9
+    assert isnan(scores["faithfulness"][1])
+    assert scores["faithfulness"][2] == 0.0
+    assert scores["faithfulness"][3] == 0.0
+
+
+def test_relabel_uses_empty_answer_texts():
+    scores = {
+        "faithfulness": [nan, nan, 0.5],
+    }
+    # row 0: judge decomposed the answer into zero statements -> model-broken -> 0.0
+    # row 1: usable answer, judge itself failed -> stays NaN (dropped under OMIT)
+    model_output = ["word salad blah blah", "a fine answer", "another answer"]
+
+    _relabel_model_broken(scores, ["faithfulness"], model_output, {"word salad blah blah"})
+
+    assert scores["faithfulness"][0] == 0.0
+    assert isnan(scores["faithfulness"][1])
+    assert scores["faithfulness"][2] == 0.5
+
+
+def test_tracked_metrics_record_empty_answers():
+    async def empty(*_args, **_kwargs):
+        return StatementGeneratorOutput(statements=[])
+
+    async def nonempty(*_args, **_kwargs):
+        return StatementGeneratorOutput(statements=["a statement"])
+
+    faith = _FaithfulnessTracked(llm=MagicMock())
+    faith.statement_generator_prompt.generate = empty  # type: ignore[method-assign]
+    asyncio.run(faith._create_statements({"response": "garbage", "user_input": "q"}, None))
+    assert "garbage" in faith.empty_answer_texts
+
+    faith_ok = _FaithfulnessTracked(llm=MagicMock())
+    faith_ok.statement_generator_prompt.generate = nonempty  # type: ignore[method-assign]
+    asyncio.run(faith_ok._create_statements({"response": "a real answer", "user_input": "q"}, None))
+    assert faith_ok.empty_answer_texts == set()
+
+    noise = _NoiseSensitivityTracked(llm=MagicMock())
+    noise.statement_generator_prompt.generate = empty  # type: ignore[method-assign]
+    result = asyncio.run(noise._decompose_answer_into_statements("garbage", "q", None))
+    assert result == []
+    assert "garbage" in noise.empty_answer_texts
+
+
+def test_relabel_is_a_noop_on_factual_correctness():
+    # factual_correctness floors broken output to 0.0 (never NaN), so relabel changes no value.
+    scores = {"factual_correctness": [0.7, 0.0, 0.0]}
+    before = list(scores["factual_correctness"])
+
+    _relabel_model_broken(scores, ["factual_correctness"], ["a real answer", "", "another answer"])
+
+    assert scores["factual_correctness"] == before

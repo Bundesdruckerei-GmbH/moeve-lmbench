@@ -14,6 +14,18 @@ from lmbench.config.config import DATASET_FOLDER
 from lmbench.models.data_models import LLMMessage
 from lmbench.task import Task
 
+ITEM_ID_COLUMN = "item_id"
+GENERATION_INDEX_COLUMN = "generation_index"
+"""Column holding the stable per-row identifier stamped into the dataset files."""
+
+
+class MissingItemIdError(RuntimeError):
+    """Raised when a dataset has no stamped item id column.
+
+    Item ids are never derived at runtime, so there is no fallback to a hash or a row position: an
+    absent column means the dataset file was not stamped and is a setup error.
+    """
+
 
 class DatasetConfig(BaseModel):
     """General dataset configuration that is used for every dataset.
@@ -82,6 +94,43 @@ class Dataset(ABC):
     def num_shrinkable(self) -> int:
         """Number of independently shrinkable input dimensions. Defaults to 0 (no shrinking supported)."""
         return 0
+
+    def item_ids(self, limit: int | None = None) -> list[str]:
+        """Return the stable per-row identifiers of the dataset with the given limit.
+
+        These are stamped into the dataset file and read back verbatim, so the same row yields the
+        same id in every run and for every model. Callers select the evaluated subset the same way
+        they do for `target_values`, by indexing the result with the selected row indices.
+
+        Args:
+            limit (Optional[int]): To how many entries the ids should be limited. If None, all ids are
+                returned. Defaults to None.
+
+        Raises:
+            MissingItemIdError: If the dataset carries no item id column.
+
+        Returns:
+            list[str]: One id per row, beginning with the first entry.
+        """
+        raise NotImplementedError
+
+    def generation_indices(self, limit: int | None = None) -> list[int | None]:
+        """Return which repeat of its item each row is, aligned with `item_ids`.
+
+        A plain dataset answers every item once, so every row is None. Only wrappers that repeat
+        items override this; None and 0 mean different things and must not be conflated.
+
+        Args:
+            limit (Optional[int]): To how many entries the result should be limited. If None, all
+                rows are returned. Defaults to None.
+
+        Returns:
+            list[int | None]: One entry per row, beginning with the first entry.
+        """
+        indices: list[int | None] = [None] * len(self)
+        if limit is not None and limit > 0 and limit < len(indices):
+            return indices[:limit]
+        return indices
 
     def target_values(self, limit: int | None = None) -> list[str]:
         """Return the list of target values of the dataset with the given limit.

@@ -18,9 +18,23 @@ from lmbench.metrics.abstract import DatasetAwareMetric, LLMAwareMetric, Metric
 from lmbench.metrics.aggregate import aggregate
 from lmbench.models.abstract import LLM
 from lmbench.models.data_models import LLMOutput
-from lmbench.models.exceptions import ContextSizeException
+from lmbench.models.exceptions import CONTENT_FILTERED_OUTPUT, ContentFilterException, ContextSizeException
+from lmbench.per_item import (
+    ARTIFACT_FILENAME,
+    PerItemScores,
+    ReconciliationError,
+    RowIdentity,
+    build_run_metadata,
+    log_run_metadata_tags,
+    merge_cached_rows,
+    reconcile_aggregates,
+    row_identities,
+)
 
 logger = logging.getLogger(__name__)
+
+RUN_ARTIFACTS = ["output.csv", "metrics.json", "selected_indices.json"]
+"""Existing output files logged to MLflow alongside the per-item artifact."""
 
 
 class EvaluationRunner:
@@ -35,6 +49,7 @@ class EvaluationRunner:
         dataset: Dataset,
         limit: int | None = None,
         excluded_indices: list[int] | None = None,
+        log_run_artifacts: bool = True,
     ):
         """Initializes the test case with the given model, dataset and metrics.
 
@@ -44,12 +59,15 @@ class EvaluationRunner:
             limit (int, optional): The maximum number of rows of the dataset to run the task on.
                 Defaults to None, which means that all rows are used.
             excluded_indices (list[int] | None): Dataset row indices that should be skipped.
+            log_run_artifacts (bool): Also upload the existing output files to MLflow, not just the
+                per-item score artifact. Defaults to True.
         """
         self.llm = llm
         self.dataset = dataset
 
         self.limit = limit
         self.excluded_indices = set(excluded_indices or [])
+        self.log_run_artifacts = log_run_artifacts
 
     def run(
         self,
@@ -106,20 +124,22 @@ class EvaluationRunner:
                 result_dataset.to_parquet(os.path.join(OUTPUT_FOLDER, "result_dataset.parquet"))
         else:
             all_results = pd.read_parquet(os.path.join(OUTPUT_FOLDER, "generations.parquet")).iloc[:, 0].to_list()
-            if not os.path.exists(indices_path):
-                logger.error("Missing selected_indices.json; cannot validate cached generations for current selection.")
-                raise AssertionError("Cached generations were created without storing selected indices.")
+            if os.path.exists(indices_path):
+                with open(indices_path) as fh:
+                    stored_indices: list[int] = json.load(fh)
 
-            with open(indices_path) as fh:
-                stored_indices: list[int] = json.load(fh)
-
-            if stored_indices != selected_indices:
-                logger.error(
-                    "Cached generations were created for different row selections. Stored: %s, requested: %s",
-                    stored_indices,
-                    selected_indices,
+                if stored_indices != selected_indices:
+                    logger.error(
+                        "Cached generations were created for different row selections. Stored: %s, requested: %s",
+                        stored_indices,
+                        selected_indices,
+                    )
+                    raise AssertionError("Selected rows do not match cached generations. Please regenerate outputs.")
+            else:
+                logger.warning(
+                    "Missing selected_indices.json; assuming cached generations cover the current selection in order "
+                    "(legacy runs predating per-item scoring)."
                 )
-                raise AssertionError("Selected rows do not match cached generations. Please regenerate outputs.")
 
             if len(all_results) != len(selected_indices):
                 logger.error(
@@ -146,6 +166,10 @@ class EvaluationRunner:
         output_path = os.path.join(OUTPUT_FOLDER, "output.csv")
         metrics_path = os.path.join(OUTPUT_FOLDER, "metrics.json")
 
+        identities = row_identities(self.dataset, selected_indices, limit=self.limit)
+        collector = PerItemScores(identities)
+        recomputed: set[str] = set()
+
         if use_metrics_cache:
             metrics_data = self._load_or_create_metrics(metrics_path)
 
@@ -157,6 +181,16 @@ class EvaluationRunner:
             metrics_data = {}
             output_df = pd.DataFrame({"target": target_values, "output": result})
 
+        # The item id is what ties a row of output.csv to the same row everywhere else.
+        # TODO: verify the ids read from a cached output.csv instead of overwriting them, once no
+        # cached file predates the column.
+        item_ids = [identity.item_id for identity in identities]
+        if "item_id" in output_df.columns:
+            output_df["item_id"] = item_ids
+        else:
+            output_df.insert(0, "item_id", item_ids)
+
+        evaluated: dict[str, Metric] = {}
         for metric in metrics:
             try:
                 if issubclass(metric, LLMAwareMetric):
@@ -168,12 +202,15 @@ class EvaluationRunner:
             except (FileNotFoundError, ImportError) as e:
                 logger.warning(f"Skipping metric {metric.name} (missing dependency): {e}")
                 continue
+            evaluated[imetric.name] = imetric
             if self._metric_exists(metrics_data, imetric.name):
                 logger.info(f"metric {imetric.name} already exists, skipping computation.")
                 self._log_existing_metrics(metrics_data, imetric.name)
             else:
                 logger.debug(f"    Evaluating {imetric.name}")
                 scores = imetric.evaluate(result, target_values)
+                recomputed.add(imetric.name)
+                collector.add_metric(imetric, scores)
 
                 per_row_scores: dict[str, list[float] | float] = {}
                 aggregated: dict[str, float] = {}
@@ -208,8 +245,71 @@ class EvaluationRunner:
         logger.info(f"Metrics saved to {metrics_path}")
         logger.info(f"Results saved to {output_path}")
 
+        self._write_per_item_artifact(collector, identities, selected_indices, recomputed, metrics_data, evaluated)
+        self._log_mlflow_artifacts()
+
+    def _write_per_item_artifact(
+        self,
+        collector: PerItemScores,
+        identities: list[RowIdentity],
+        selected_indices: list[int],
+        recomputed: set[str],
+        published: dict[str, float],
+        evaluated: dict[str, Metric],
+    ) -> None:
+        """Write the per-item score artifact and mirror its metadata onto the MLflow run.
+
+        The rows must re-aggregate to the numbers this run publishes before any of it is written.
+        The artifact is a claim about where those numbers came from, and rows merged from the metrics
+        cache are as much a part of that claim as the ones just computed.
+        """
+        artifact_path = os.path.join(OUTPUT_FOLDER, ARTIFACT_FILENAME)
+        merge_cached_rows(collector, artifact_path, recomputed)
+
+        mismatches = reconcile_aggregates(collector, published, evaluated)
+        if mismatches:
+            raise ReconciliationError(mismatches)
+
+        metadata = build_run_metadata(self.llm, self.dataset, identities, selected_indices, collector)
+        collector.write(artifact_path, metadata)
+        log_run_metadata_tags(metadata)
+
+        if collector.aggregate_only_metrics:
+            logger.info(
+                "Metrics with no per-item scores in this run (no confidence interval downstream): %s",
+                ", ".join(sorted(set(collector.aggregate_only_metrics))),
+            )
+
+    def _log_mlflow_artifacts(self) -> None:
+        """Upload the per-item artifact, and the other output files if the run asked for them."""
+        filenames = [ARTIFACT_FILENAME] + (RUN_ARTIFACTS if self.log_run_artifacts else [])
+        for filename in filenames:
+            path = os.path.join(OUTPUT_FOLDER, filename)
+            if not os.path.exists(path):
+                continue
+            try:
+                mlflow.log_artifact(path)
+            except Exception as e:
+                logger.warning("Could not upload %s to MLflow: %s", filename, e)
+
     def _compute_generations(self, indices: list[int], num_threads: int, use_cache: bool):
         SHRINK_EPSILON = 1e-6
+
+        # Repeats of an item (n_iterations, or a generation_index column) are cached per sample; None and 0 keep the
+        # plain message key.
+        generations = self.dataset.generation_indices()
+
+        def call(llm_input, dataset_idx: int):
+            # Repeated samples send the same messages; the suffix keeps their cached answers apart.
+            generation = generations[dataset_idx] if generations is not None else None
+            suffix = f"g={generation}" if generation else None
+            try:
+                if use_cache:
+                    return self.llm.cached_invoke(llm_input, cache_key_suffix=suffix)
+                return self.llm.invoke(llm_input)
+            except ContentFilterException as e:
+                logger.warning(f"Content filter rejected row {dataset_idx}: {e}")
+                return CONTENT_FILTERED_OUTPUT
 
         def process_index(dataset_idx: int):
             num_cols = max(1, self.dataset.num_shrinkable)
@@ -230,10 +330,7 @@ class EvaluationRunner:
                 token_factor = self.llm.check_tokens(llm_input)
 
             try:
-                if use_cache:
-                    llm_output = self.llm.cached_invoke(llm_input)
-                else:
-                    llm_output = self.llm.invoke(llm_input)
+                llm_output = call(llm_input, dataset_idx)
             except ContextSizeException as e:
                 target_idx = min(active, num_cols - 1)
                 factors[target_idx] *= e.shrink_factor
@@ -242,11 +339,7 @@ class EvaluationRunner:
                     factors[target_idx] -= LAST_CHANCE_SHRINKAGE
                 logger.info(f"Context Size Exceeded! Shrinking with factors {[f'{f:.5f}' for f in factors]}")
                 llm_input = self.dataset.llm_input_at_index(dataset_idx, shrink_factor=factors)
-
-                if use_cache:
-                    llm_output = self.llm.cached_invoke(llm_input)
-                else:
-                    llm_output = self.llm.invoke(llm_input)
+                llm_output = call(llm_input, dataset_idx)
 
             # Check for empty strings or None and replace them with a space
             # Some metrics expect a non-empty output
@@ -258,7 +351,17 @@ class EvaluationRunner:
         if num_threads > 1:
             logger.info(f"Running with {num_threads} threads.")
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-                result = list(tqdm(executor.map(process_index, indices), total=len(indices), desc="Running evaluation"))
+                result: list[LLMOutput | str] = [""] * len(indices)
+                future_to_position = {
+                    executor.submit(process_index, dataset_idx): position
+                    for position, dataset_idx in enumerate(indices)
+                }
+                for future in tqdm(
+                    concurrent.futures.as_completed(future_to_position),
+                    total=len(future_to_position),
+                    desc="Running evaluation",
+                ):
+                    result[future_to_position[future]] = future.result()
         else:
             logger.info("Running with 1 thread.")
             result = [process_index(i) for i in tqdm(indices, desc="Running evaluation")]
@@ -323,6 +426,10 @@ class EvaluationRunner:
     def _load_or_create_output_df(output_path, target_values, result, validate: bool = False):
         if os.path.exists(output_path):
             output_df = pd.read_csv(output_path)
+            # TODO: align on item_id rather than comparing target/output positionally, which is all
+            # position allowed before ids existed. Content freshness then needs a file-level check
+            # (dataset_version, model identity), and an id join could reuse the overlapping subset
+            # instead of failing the whole run.
             if validate:
                 for i in range(len(target_values)):
                     expected = str(target_values[i])
@@ -335,9 +442,10 @@ class EvaluationRunner:
                         )
                 for i in range(len(result)):
                     raw = output_df["output"].iat[i]
+                    missing = bool(output_df["output"].isna().iat[i])
                     expected = str(result[i]).rstrip("\x00")
-                    if not (pd.isna(raw) and result[i] == "N/A"):
-                        actual = str(raw).rstrip("\x00") if not pd.isna(raw) else ""
+                    if not (missing and result[i] == "N/A"):
+                        actual = str(raw).rstrip("\x00") if not missing else ""
                         if actual != expected:
                             logger.error(f"Output mismatch at index {i}: expected {expected!r}, got {raw!r}")
                             raise AssertionError(

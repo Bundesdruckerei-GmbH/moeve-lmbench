@@ -3,6 +3,7 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from lmbench.evaluation import EvaluationRunner
 from lmbench.metrics.match import Match
@@ -33,6 +34,7 @@ def _make_runner(num_shrinkable: int, token_factors: list[float]):
     dataset = MagicMock()
     dataset.num_shrinkable = num_shrinkable
     dataset.llm_input_at_index = MagicMock(return_value=[{"role": "user", "content": "x"}])
+    dataset.generation_indices = MagicMock(return_value=[None] * 10)
 
     llm = MagicMock()
     llm.check_tokens = MagicMock(side_effect=token_factors)
@@ -112,3 +114,159 @@ def test_compute_generations_context_size_exception_retry():
     assert retry_factors[0] < 0.5  # 0.5 * 1.0 minus the 0.01 last-chance shrinkage
     assert retry_factors[1] == 1.0
     assert retry_factors[2] == 1.0
+
+
+def _stamped_dataset(tmp_path, mocker):
+    """A real DataframeDataset over a small stamped dataset file on disk."""
+    from lmbench.dataset.abstract import ITEM_ID_COLUMN, DatasetConfig
+    from lmbench.dataset.dataframe import DataframeDataset, DataframeDatasetConfig
+    from lmbench.task import Task
+
+    folder = tmp_path / "e2e"
+    folder.mkdir()
+    pd.DataFrame(
+        {
+            "shrink_column": ["doc a", "doc b", "doc c"],
+            "target_column": ["target0", "target1", "target2"],
+            ITEM_ID_COLUMN: ["e2e:000", "e2e:001", "e2e:002"],
+        }
+    ).to_csv(folder / "e2e.csv", index=False)
+    (folder / "user_prompt.txt").write_text("a prompt")
+    mocker.patch("lmbench.dataset.abstract.DATASET_FOLDER", str(tmp_path))
+    config = DatasetConfig(
+        task=Task.SUMMARIZATION,
+        filename="e2e.csv",
+        dataset_type="dataframe",
+        config=DataframeDatasetConfig(
+            system_prompt=None,
+            user_prompt="user_prompt.txt",
+            target_column="target_column",
+            shrink_column="shrink_column",
+        ).model_dump(),
+    )
+    return DataframeDataset("e2e", dataset_config=config)
+
+
+def test_run_writes_a_per_item_artifact_and_stamps_output_csv(tmp_path, mocker):
+    import json
+
+    import pyarrow.parquet as pq
+
+    from lmbench.per_item import ARTIFACT_FILENAME
+
+    dataset = _stamped_dataset(tmp_path, mocker)
+
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.temperature = 0.0
+    llm.check_tokens = MagicMock(return_value=1.0)
+    # Two hits and one miss, so the artifact has to carry both an ok and a scored-zero row.
+    llm.cached_invoke = MagicMock(side_effect=["target0", "target1", "something else"])
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch("lmbench.evaluation.OUTPUT_FOLDER", temp_dir):
+            runner = EvaluationRunner(llm=llm, dataset=dataset)
+            runner.run([Match], use_metrics_cache=False)
+
+            output = pd.read_csv(os.path.join(temp_dir, "output.csv"))
+            assert output.columns.to_list()[0] == "item_id"
+            assert output["item_id"].to_list() == ["e2e:000", "e2e:001", "e2e:002"]
+
+            table = pq.read_table(os.path.join(temp_dir, ARTIFACT_FILENAME))
+
+    rows = table.to_pylist()
+    assert len(rows) == 3 * 3  # three items x three ExactMatch sub-scores
+    assert {row["metric"] for row in rows} == {
+        "ExactMatch:exact_match",
+        "ExactMatch:case_insensitive_match",
+        "ExactMatch:fuzzy_match",
+    }
+    assert all(row["status"] == "ok" for row in rows)
+    assert all(row["judge"] is None for row in rows)
+    # A plain summarization dataset has no resampling structure above the item.
+    assert all(row["cluster_id"] is None and row["cluster_id_2"] is None and row["stratum"] is None for row in rows)
+    assert all(row["generation_index"] is None for row in rows)
+
+    exact = {row["item_id"]: row["score"] for row in rows if row["metric"] == "ExactMatch:exact_match"}
+    assert exact == {"e2e:000": 1.0, "e2e:001": 1.0, "e2e:002": 0.0}
+
+    metadata = {key.decode(): value.decode() for key, value in table.schema.metadata.items()}
+    assert metadata["schema_version"] == "1"
+    assert metadata["dataset"] == "e2e"
+    assert metadata["task"] == "summarization"
+    assert metadata["n_items"] == "3"
+    assert metadata["dataset_version"].startswith("sha256:")
+    assert metadata["n_rows_evaluated"] == "3"
+    assert json.loads(metadata["selected_indices"]) == [0, 1, 2]
+    assert json.loads(metadata["covered_metrics"]) == sorted(
+        ["ExactMatch:exact_match", "ExactMatch:case_insensitive_match", "ExactMatch:fuzzy_match"]
+    )
+    assert json.loads(metadata["metrics_without_per_item"]) == []
+
+
+def test_skip_generation_without_selected_indices_uses_cached_order(tmp_path, mocker):
+    """Runs archived before per-item scoring have generations.parquet but no selected_indices.json;
+    skip_generation falls back to the cached order in the file instead of erroring."""
+    dataset = _stamped_dataset(tmp_path, mocker)
+
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.temperature = 0.0
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        pd.DataFrame(["target0", "target1", "wrong"]).to_parquet(os.path.join(temp_dir, "generations.parquet"))
+        with patch("lmbench.evaluation.OUTPUT_FOLDER", temp_dir):
+            EvaluationRunner(llm=llm, dataset=dataset).run([Match], skip_generation=True, use_metrics_cache=False)
+
+            assert not os.path.exists(os.path.join(temp_dir, "selected_indices.json"))
+            output = pd.read_csv(os.path.join(temp_dir, "output.csv"))
+            assert output["output"].to_list() == ["target0", "target1", "wrong"]
+
+
+def test_skip_generation_count_mismatch_still_raises(tmp_path, mocker):
+    """The count guard survives the missing-file fallback: fewer cached rows than selected still fails."""
+    dataset = _stamped_dataset(tmp_path, mocker)
+
+    llm = MagicMock()
+    llm.model = "test-model"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        pd.DataFrame(["only", "two"]).to_parquet(os.path.join(temp_dir, "generations.parquet"))
+        with patch("lmbench.evaluation.OUTPUT_FOLDER", temp_dir):
+            with pytest.raises(AssertionError):
+                EvaluationRunner(llm=llm, dataset=dataset).run([Match], skip_generation=True, use_metrics_cache=False)
+
+
+def test_run_without_item_ids_fails(tmp_path, mocker):
+    from lmbench.dataset.abstract import ITEM_ID_COLUMN, MissingItemIdError
+
+    dataset = _stamped_dataset(tmp_path, mocker)
+    dataset.dataset = dataset.dataset.drop(columns=[ITEM_ID_COLUMN])
+
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.check_tokens = MagicMock(return_value=1.0)
+    llm.cached_invoke = MagicMock(return_value="whatever")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch("lmbench.evaluation.OUTPUT_FOLDER", temp_dir):
+            with pytest.raises(MissingItemIdError):
+                EvaluationRunner(llm=llm, dataset=dataset).run([Match], use_metrics_cache=False)
+
+
+def test_content_filter_rejection_is_recorded_instead_of_failing_the_run():
+    from lmbench.models.exceptions import CONTENT_FILTERED_OUTPUT, ContentFilterException
+
+    runner, _, llm = _make_runner(num_shrinkable=1, token_factors=[1.0, 1.0])
+    llm.cached_invoke = MagicMock(side_effect=[ContentFilterException("filtered"), "ok"])
+    assert runner._compute_generations([0, 1], num_threads=1, use_cache=True) == [CONTENT_FILTERED_OUTPUT, "ok"]
+
+
+def test_cache_key_suffix_follows_a_generation_index_column():
+    """A dataframe dataset that repeats single rows gets one cache entry per repeat; 0 and empty keep the plain key."""
+    runner, dataset, llm = _make_runner(num_shrinkable=1, token_factors=[1.0] * 4)
+    dataset.generation_indices = MagicMock(return_value=[None, 0, 1, 4])
+    llm.cached_invoke = MagicMock(return_value="ok")
+    runner._compute_generations([0, 1, 2, 3], num_threads=1, use_cache=True)
+    suffixes = [c.kwargs["cache_key_suffix"] for c in llm.cached_invoke.call_args_list]
+    assert suffixes == [None, None, "g=1", "g=4"]

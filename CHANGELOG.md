@@ -5,7 +5,42 @@ All notable changes to LMBench are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-11-18
+
+### Added
+
+- **Per-item score artifact** — every run writes `per_item_scores.parquet` with one
+  score row per item and metric, the input for computing confidence intervals on the
+  aggregates. Rows carry the clusters and strata to resample by, and each published
+  aggregate can be recomputed from them. Uploaded to MLflow; `--log-run-artifacts`
+  (default on) uploads the run's other outputs with it.
+- **Content-filter handling** — when OpenAI, Azure OpenAI or Anthropic reject a
+  request or filter an answer, the item is recorded as filtered instead of being
+  retried and aborting the run.
+- Per-generation scores for the Values metric, behind its reported proportions.
+- An optional `generation_index` dataset column to mark repeated samples of one item.
+
+### Changed
+
+- **Datasets need an `item_id` column** with a stable, unique id per row; runs on a
+  dataset without one fail. The bundled sample datasets are stamped. See "Adding your
+  own dataset" in the README.
+- **Ragas metrics no longer score judge failures as 0.** A NaN caused by a failed
+  judge call is left out of the mean; empty or broken model output still scores 0.
+  Results only differ from earlier releases where a judge call failed.
+- Datasets with `n_iterations > 1` no longer require `--no-cache` and
+  `--temperature > 0`; each repeat is cached separately.
+- Hallucination metric: sub-scores are reported under their published names
+  (`status_accuracy`, `reference_f1`, `conflict_handling`, ...), and the config weight
+  `knowledge_leakage` is renamed to `knowledge_leakage_avoidance`. Configs that set
+  the old key need updating.
+- Parquet I/O uses pyarrow instead of fastparquet.
+- Docker base image updated to CUDA 13.5.0; dependencies refreshed, including fixes
+  for published security advisories.
+
+### Fixed
+
+- Multi-threaded runs return generations in dataset order.
 
 ## [0.3.0] - 2026-08-20
 
