@@ -18,7 +18,13 @@ from typing import override
 import pandas as pd
 from pydantic import BaseModel
 
-from lmbench.dataset.abstract import Dataset, DatasetConfig
+from lmbench.dataset.abstract import (
+    GENERATION_INDEX_COLUMN,
+    ITEM_ID_COLUMN,
+    Dataset,
+    DatasetConfig,
+    MissingItemIdError,
+)
 from lmbench.models.data_models import LLMMessage, LLMRole
 from lmbench.utils import get_keys_from_format_string
 
@@ -192,6 +198,33 @@ class DataframeDataset(Dataset):
     @override
     def __len__(self) -> int:
         return len(self.dataset)
+
+    @override
+    def item_ids(self, limit: int | None = None) -> list[str]:
+        if ITEM_ID_COLUMN not in self.dataset.columns:
+            raise MissingItemIdError(
+                f"Dataset '{self.name}' has no '{ITEM_ID_COLUMN}' column. "
+                "Add one with a stable, unique id per row (see 'Adding your own dataset' in the README)."
+            )
+        ids = self.dataset[ITEM_ID_COLUMN].astype(str).to_list()
+        if limit is not None and limit > 0 and limit < len(ids):
+            return ids[:limit]
+        return ids
+
+    @override
+    def generation_indices(self, limit: int | None = None) -> list[int | None]:
+        """Return the optional `generation_index` column: which repeat of its item each row is.
+
+        A dataset can repeat single rows (same prompt, same `item_id`) to sample them several times; the copies carry
+        `generation_index` 1, 2, ... and are cached per sample. An empty cell, or no column at all, means the row is
+        answered once (None), as for every row of a dataset without the column.
+        """
+        if GENERATION_INDEX_COLUMN not in self.dataset.columns:
+            return super().generation_indices(limit)
+        indices: list[int | None] = [None if pd.isna(v) else int(v) for v in self.dataset[GENERATION_INDEX_COLUMN]]
+        if limit is not None and limit > 0 and limit < len(indices):
+            return indices[:limit]
+        return indices
 
     @override
     def target_values(self, limit: int | None = None) -> list[str]:

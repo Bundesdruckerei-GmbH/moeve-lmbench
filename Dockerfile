@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.3.1-devel-ubuntu22.04
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:13.5.0-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
 ARG BASE_IMAGE
 
@@ -27,7 +27,7 @@ RUN if [ "$CREATE_VLLM" = "true" ]; then \
       update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 && \
       apt-get clean -y && rm -rf /var/lib/apt/lists/* && \
       conda create -n vllm python=3.12 -y && \
-      conda run -n vllm pip install --no-cache-dir vllm bitsandbytes && \
+      conda run -n vllm pip install --no-cache-dir vllm bitsandbytes "aleph-alpha-inference>=1.0" && \
       conda clean -ay && \
       rm -rf /opt/miniconda/pkgs && \
       find / -type d -name __pycache__ | xargs rm -rf; \

@@ -118,7 +118,7 @@ class HallucinationConfig(BaseModel):
         default_factory=lambda: {
             "status_correctness": 0.30,
             "refusal_quality": 0.40,
-            "knowledge_leakage": 0.30,
+            "knowledge_leakage_avoidance": 0.30,
         }
     )
     conflicting_weights: dict[str, float] = Field(

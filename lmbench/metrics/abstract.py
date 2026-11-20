@@ -17,6 +17,8 @@ class Metric(ABC):
     tasks: list[Task]
     aggregations: list[AggregationType] | None = None
     nan_policy: NanPolicy = NanPolicy.ZERO
+    judge_llm_config: str | None = None
+    """Name of the `CONFIG` attribute holding the judge that produced this metric's scores."""
 
     @abstractmethod
     def description(self) -> str:
@@ -55,6 +57,37 @@ class Metric(ABC):
                 already aggregated scalar value.
         """
         raise NotImplementedError
+
+    def item_scores(self) -> dict[str, list[float | None]] | None:
+        """Return per-item scores for keys that `evaluate` can only report aggregated.
+
+        Some metrics aggregate inside `evaluate` because the aggregate is the meaningful quantity
+        (a proportion over a group, say). The per-item values still exist on the way there, and the
+        artifact needs them, so they are exposed here instead of being forced into `evaluate`'s
+        return type where they would change what gets logged to MLflow.
+
+        A None entry means the key does not apply to that row and no row is emitted for it.
+
+        Returns:
+            Mapping from score name to one value per evaluated row, or None if the metric has none.
+        """
+        return None
+
+    def item_statuses(self) -> dict[str, list[str | None]] | None:
+        """Return the per-item status of each score, for metrics that can tell failure from absence.
+
+        Without this a missing score is guessed at from its value. A metric that knows the
+        difference between "the judge failed here" and "this dimension does not apply to this item"
+        reports it here, since only the first belongs in a failure rate.
+
+        Implementing this also declares which keys carry per-item meaning: keys absent from the
+        mapping are left out of the artifact entirely, and a None entry drops that single row.
+
+        Returns:
+            Mapping from score name to one `ItemStatus` value (or None) per evaluated row, or None
+            if the metric does not distinguish.
+        """
+        return None
 
 
 class LLMAwareMetric(Metric):

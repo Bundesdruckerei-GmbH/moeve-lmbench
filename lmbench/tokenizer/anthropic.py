@@ -26,11 +26,6 @@ class AnthropicTokenizer(Tokenizer):
 
     name: str = "anthropic"
 
-    @retry(
-        before_sleep=before_sleep_log(logger, logging.INFO),
-        stop=stop_after_attempt(CONFIG.retry.stop_after_attempt),
-        wait=wait_random_exponential(min=CONFIG.retry.min_wait, max=CONFIG.retry.max_wait),
-    )
     @override
     def num_tokens(self, messages: list["LLMMessage"]) -> int:
         system_parts: list[str] = []
@@ -40,8 +35,10 @@ class AnthropicTokenizer(Tokenizer):
                 continue
             if m.role == LLMRole.SYSTEM:
                 system_parts.append(m.content)
+            elif m.role == LLMRole.ASSISTANT:
+                conv_messages.append({"role": "assistant", "content": m.content})
             else:
-                conv_messages.append({"role": m.role.value, "content": m.content})
+                conv_messages.append({"role": "user", "content": m.content})
 
         if not conv_messages:
             return 0
@@ -50,5 +47,13 @@ class AnthropicTokenizer(Tokenizer):
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
 
+        return self._count_tokens(kwargs)
+
+    @retry(
+        before_sleep=before_sleep_log(logger, logging.INFO),
+        stop=stop_after_attempt(CONFIG.retry.stop_after_attempt),
+        wait=wait_random_exponential(min=CONFIG.retry.min_wait, max=CONFIG.retry.max_wait),
+    )
+    def _count_tokens(self, kwargs: dict[str, Any]) -> int:
         result = self.llm.anthropic_client.messages.count_tokens(**kwargs)  # type: ignore[attr-defined]
         return result.input_tokens

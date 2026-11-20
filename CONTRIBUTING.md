@@ -13,6 +13,8 @@ Open an issue on GitHub. For bugs, include reproduction steps and your environme
 3. Run `prek run --all-files` and `uv run pytest` before submitting.
 4. Open a PR against `main` describing the change.
 
+No changelog entry is needed — `CHANGELOG.md` is written by maintainers at release time.
+
 We respond on a best-effort basis.
 
 ## License

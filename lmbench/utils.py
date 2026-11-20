@@ -6,7 +6,7 @@ import re
 from string import Formatter
 from typing import Any
 
-from lmbench.models.exceptions import ContextSizeException
+from lmbench.models.exceptions import CONTENT_FILTER_MARKERS, ContentFilterException, ContextSizeException
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,13 @@ def quantization_from_model(provider: str, model_name: str) -> str | None:
     elif provider == "ollama" and ":" not in model_name:
         return "4-bit"  # Per default we assume 4 bit if ollama is used
     return None
+
+
+def bad_request_exception(errormsg: str) -> ContentFilterException | ContextSizeException:
+    """Map a provider's bad-request error to a content-filter rejection or a context size excess."""
+    if any(marker in errormsg for marker in CONTENT_FILTER_MARKERS):
+        return ContentFilterException(errormsg)
+    return context_size_eception_from_errormsg(errormsg)
 
 
 def context_size_eception_from_errormsg(errormsg: str) -> ContextSizeException:

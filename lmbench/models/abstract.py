@@ -13,7 +13,7 @@ from lmbench import utils
 from lmbench.config.config import CACHE_FOLDER, CONFIG
 from lmbench.models.cache_manager import CacheManager
 from lmbench.models.data_models import LLMMessage, LLMOutput
-from lmbench.models.exceptions import ContextSizeException
+from lmbench.models.exceptions import ContentFilterException, ContextSizeException
 from lmbench.reasoning_parser import REASONING_PARSER_MAP, ReasoningParser
 from lmbench.tokenizer import TOKENIZER_MAP
 
@@ -144,18 +144,21 @@ class LLM(ABC):
         hashobj.update(self.model.encode("utf-8"))
         return hashobj.hexdigest()
 
-    def cached_invoke(self, messages: list[LLMMessage]) -> LLMOutput | str:
+    def cached_invoke(self, messages: list[LLMMessage], cache_key_suffix: str | None = None) -> LLMOutput | str:
         """Invoke the LLM with a list of messages using a cache if available.
 
         Args:
             messages (list[LLMMessage]): The messages that are given to the llm. This is usually an instruction in form
                 of a system message and some context as a user message.
+            cache_key_suffix (str | None): Tells apart calls with the same messages that must not share an answer,
+                such as repeated samples of one item. None keeps the plain message key.
 
         Returns:
             LLMOutput | str: The output of the LLM as a string or an LLMOutput object if a reasoning parser is
                 available.
         """
-        msg_hash = hashlib.md5(str(messages).encode("utf-8")).hexdigest()
+        key = str(messages) if cache_key_suffix is None else f"{messages}|{cache_key_suffix}"
+        msg_hash = hashlib.md5(key.encode("utf-8")).hexdigest()
         cached = self.cache.get(msg_hash)
         if cached is not None:
             logger.debug(f"Cache hit with message hash {msg_hash}")
@@ -178,7 +181,7 @@ class LLM(ABC):
 
     @retry(
         before_sleep=before_sleep_log(logger, logging.INFO),
-        retry=retry_if_not_exception_type(ContextSizeException),
+        retry=retry_if_not_exception_type((ContextSizeException, ContentFilterException)),
         stop=stop_after_attempt(CONFIG.retry.stop_after_attempt),
         wait=wait_random_exponential(min=CONFIG.retry.min_wait, max=CONFIG.retry.max_wait),
     )

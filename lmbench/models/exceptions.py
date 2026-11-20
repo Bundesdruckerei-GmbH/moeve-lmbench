@@ -28,3 +28,17 @@ class ContextSizeException(Exception):
     @override
     def __str__(self):
         return f"{self.shrink_factor}: {self.message}"
+
+
+CONTENT_FILTERED_OUTPUT = "<<content_filter>>"
+"""Stored as the model's answer when the provider's content filter rejected the request or the answer."""
+
+CONTENT_FILTER_MARKERS = ("content_filter", "content management policy", "ResponsibleAIPolicyViolation", "cyber_policy")
+"""Substrings of a provider error that mark a content-filter rejection rather than a malformed request."""
+
+
+class ContentFilterException(Exception):
+    """Exception raised when the provider's content filter rejected a request or its answer.
+
+    Retrying sends the same content and gets the same rejection, so it is recorded instead.
+    """

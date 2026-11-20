@@ -1,14 +1,9 @@
 from lmbench.metrics.hallucination_utils import (
     ResponseStatus,
-    clamp01,
-    closest_index,
-    f1_score,
-    majority_bool,
-    median_score,
     normalize_hallucination_question_type,
     parse_hallucination_output,
-    score_variance,
 )
+from lmbench.metrics.utils import clamp01, closest_index, f1_score, majority_bool, median_score, score_variance
 
 
 def test_clamp01_clamps_out_of_range():

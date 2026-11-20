@@ -10,7 +10,8 @@ from anthropic.types import MessageParam
 
 from lmbench.models.abstract import LLM
 from lmbench.models.data_models import LLMMessage, LLMOutput, LLMRole
-from lmbench.utils import context_size_eception_from_errormsg
+from lmbench.models.exceptions import ContentFilterException
+from lmbench.utils import bad_request_exception
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,10 @@ class AnthropicLLM(LLM):
         for m in messages:
             if m.role == LLMRole.SYSTEM:
                 system_parts.append(m.content)
+            elif m.role == LLMRole.ASSISTANT:
+                conv_messages.append({"role": "assistant", "content": m.content})
             else:
-                conv_messages.append({"role": m.role.value, "content": m.content})
+                conv_messages.append({"role": "user", "content": m.content})
 
         create_kwargs: dict[str, Any] = {
             "model": self.model,
@@ -79,7 +82,15 @@ class AnthropicLLM(LLM):
         try:
             response = self.anthropic_client.messages.create(**create_kwargs)
         except anthropic.BadRequestError as e:
-            raise context_size_eception_from_errormsg(getattr(e, "message", str(e)))
+            raise bad_request_exception(getattr(e, "message", str(e)))
+
+        if response.stop_reason == "refusal":
+            # The category (e.g. "cyber") says which policy triggered; it ends up in the run log via the exception.
+            details = getattr(response, "stop_details", None)
+            category = getattr(details, "category", None)
+            explanation = getattr(details, "explanation", None)
+            reason = f"category={category}" + (f", explanation={explanation}" if explanation else "")
+            raise ContentFilterException(f"{self.model}: refused ({reason})")
 
         text_parts: list[str] = []
         reasoning_parts: list[str] = []

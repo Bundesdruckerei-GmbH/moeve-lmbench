@@ -106,3 +106,36 @@ def test_anthropic_returns_llm_output_with_thinking(mocker: MockerFixture):
     assert result == "final answer"
     assert result.reasoning_output == "step-by-step reasoning"
     assert result.original_output == "<think>step-by-step reasoning</think>final answer"
+
+
+def test_anthropic_refusal_raises_content_filter(mocker: MockerFixture):
+    import pytest
+
+    from lmbench.models.exceptions import ContentFilterException
+
+    os.environ["API_KEY"] = "test_api_key"
+    llm = AnthropicLLM.from_arg_string(model="claude-opus-4-7", arg_string="api_key=API_KEY")
+    mock_create = mocker.patch.object(llm.anthropic_client.messages, "create")
+    response = _mock_text_response("")
+    response.stop_reason = "refusal"
+    mock_create.return_value = response
+
+    with pytest.raises(ContentFilterException):
+        llm.invoke([LLMMessage(role=LLMRole.USER, content="Hello")])
+
+
+def test_anthropic_refusal_names_the_policy_category(mocker: MockerFixture):
+    import pytest
+
+    from lmbench.models.exceptions import ContentFilterException
+
+    os.environ["API_KEY"] = "test_api_key"
+    llm = AnthropicLLM.from_arg_string(model="claude-opus-4-7", arg_string="api_key=API_KEY")
+    mock_create = mocker.patch.object(llm.anthropic_client.messages, "create")
+    response = _mock_text_response("")
+    response.stop_reason = "refusal"
+    response.stop_details = MagicMock(category="cyber", explanation=None)
+    mock_create.return_value = response
+
+    with pytest.raises(ContentFilterException, match=r"refused \(category=cyber\)"):
+        llm.invoke([LLMMessage(role=LLMRole.USER, content="Hello")])

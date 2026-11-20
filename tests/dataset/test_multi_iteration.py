@@ -9,6 +9,8 @@ class DummyDataset(Dataset):
     def __init__(self):
         self.name = "dummy"
         self.task = "task"
+        self.filename = "dummy.csv"
+        self.config_dict = {}
         self.config = None
 
     @staticmethod
@@ -61,3 +63,19 @@ def test_target_values_with_limit_more():
     mid = MultiIterationDataset(base, 2)
     # limit > total, should return full repeated list
     assert mid.target_values(limit=10) == ["a", "b", "a", "b"]
+
+
+def test_generation_indices_align_with_the_interleaved_repeats():
+    base = DummyDataset()
+    mid = MultiIterationDataset(base, 3)
+    assert mid.generation_indices() == [0, 0, 1, 1, 2, 2]
+
+
+def test_generation_indices_with_limit():
+    base = DummyDataset()
+    mid = MultiIterationDataset(base, 3)
+    assert mid.generation_indices(limit=3) == [0, 0, 1]
+
+
+def test_base_dataset_reports_no_generation_index():
+    assert DummyDataset().generation_indices() == [None, None]

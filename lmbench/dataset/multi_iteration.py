@@ -14,6 +14,8 @@ class MultiIterationDataset(Dataset):
         self.n = n
         self.name = base.name
         self.task = base.task
+        self.filename = base.filename
+        self.config_dict = base.config_dict
 
     def __len__(self) -> int:
         """Total number of examples (base length multiplied by iterations)."""
@@ -28,6 +30,26 @@ class MultiIterationDataset(Dataset):
     def num_shrinkable(self) -> int:
         """Proxy to the wrapped dataset's shrinkable dimensions."""
         return self.base.num_shrinkable
+
+    def item_ids(self, limit: int | None = None) -> list[str]:
+        """Return item ids repeated up to the specified limit.
+
+        Repetition is interleaved rather than blocked, matching `llm_input_at_index`'s `index % len(base)`,
+        so each id legitimately appears `n` times. Callers distinguish the repeats by generation index.
+        """
+        ids = self.base.item_ids(limit=None)
+        repeated = ids * self.n
+        if limit is not None and limit > 0 and limit < len(repeated):
+            return repeated[:limit]
+        return repeated
+
+    def generation_indices(self, limit: int | None = None) -> list[int | None]:
+        """Return the repeat number of each row, matching `item_ids`' interleaved repetition."""
+        base_length = len(self.base)
+        indices: list[int | None] = [i // base_length for i in range(base_length * self.n)]
+        if limit is not None and limit > 0 and limit < len(indices):
+            return indices[:limit]
+        return indices
 
     def target_values(self, limit: int | None = None) -> list[str]:
         """Return target values repeated up to the specified limit."""

@@ -1,186 +1,74 @@
 """LLM-as-judge hallucination metric using DSPy."""
 
-import json
 import logging
-from collections.abc import Callable
-from math import nan
-from typing import Any, override
+from math import isnan, nan
+from typing import override
 
 import dspy
 from dspy import InputField, OutputField, Signature
-from dspy.adapters.json_adapter import JSONAdapter
 from dspy.primitives import Module
 from dspy.primitives.prediction import Prediction
-from dspy.utils.exceptions import AdapterParseError
-from litellm.exceptions import APIError as LiteLLMAPIError
 from tqdm import tqdm
 
-from lmbench.config.config import CACHE_FOLDER, CONFIG
+from lmbench.config.config import CONFIG
 from lmbench.dataset.abstract import Dataset
 from lmbench.metrics.abstract import DatasetAwareMetric
 from lmbench.metrics.aggregate import NanPolicy
-from lmbench.metrics.hallucination_utils import (
-    closest_index,
-    f1_score,
-    majority_bool,
-    median_score,
-    normalize_hallucination_question_type,
-    parse_hallucination_output,
-    score_variance,
+from lmbench.metrics.hallucination_utils import normalize_hallucination_question_type, parse_hallucination_output
+from lmbench.metrics.judge.calls import CatchJudgeFailure, call_judge_n
+from lmbench.metrics.judge.claims import (
+    ClaimExtractionSignature,
+    ClaimSupportVerificationSignature,
+    FactualCorrectnessF1,
+    parse_bool_verdicts,
 )
+from lmbench.metrics.judge.lm import HarmonyUnwrappingJSONAdapter, build_judge_lm
+from lmbench.metrics.utils import closest_index, majority_bool, median_score, score_variance
+from lmbench.per_item import ItemStatus
 from lmbench.task import Task
 
 logger = logging.getLogger(__name__)
+
+
+COMPOSITE_SCORE = "hallucination_benchmark_score"
+"""The weighted benchmark score, named identically in both vocabularies."""
+
+_PUBLISHED_SCORE_KEY: dict[str, str] = {
+    COMPOSITE_SCORE: COMPOSITE_SCORE,
+    "status_correctness": "status_accuracy",
+    "factual_correctness": "factual_correctness",
+    "document_f1": "reference_f1",
+    "context_groundedness": "context_groundedness",
+    "refusal_quality": "refusal_quality",
+    "knowledge_leakage_avoidance": "knowledge_leakage_avoidance",
+    "conflict_detection_quality": "conflict_handling",
+}
+"""Sub-score names as scored (config and evaluator vocabulary) to names as published.
+
+Scoring keys are the config's weight names; published keys are the run archive's column names. The
+two are translated once, on the way out, so neither contract has to move to match the other.
+"""
+
+_JUDGE_SAMPLED_SCORES = (
+    "factual_correctness",
+    "context_groundedness",
+    "refusal_quality",
+    "knowledge_leakage_avoidance",
+    "conflict_detection_quality",
+)
+"""Sub-scores whose evaluator queries the judge, and so reports rollout variance."""
+
+
+def _variance_key(score: str) -> str:
+    """Return the published column name for a sub-score's judge variance."""
+    return f"evaluator_{_PUBLISHED_SCORE_KEY[score]}_variance"
 
 
 def _build_hallucination_judge_lm() -> dspy.LM:
     assert CONFIG.hallucination_judge_llm is not None, (
         "hallucination_judge_llm config is required for the Hallucination metric."
     )
-    dspy.configure_cache(disk_cache_dir=str(CACHE_FOLDER / "dspy"))
-
-    judge = CONFIG.hallucination_judge_llm
-    lm_kwargs = judge.lm_args.model_dump(exclude_none=True)
-    if judge.provider == "azure_openai":
-        deployment = judge.azure_deployment or judge.model
-        return dspy.LM(
-            model=f"azure/{deployment}",
-            api_base=f"{judge.azure_endpoint}/openai/deployments/{deployment}",
-            api_key=judge.api_key,
-            api_version=judge.api_version,
-            num_retries=15,
-            **lm_kwargs,
-        )
-    return dspy.LM(
-        model=f"openai/{judge.model}",
-        api_base=judge.base_url,
-        api_key=judge.api_key,
-        num_retries=15,
-        **lm_kwargs,
-    )
-
-
-JUDGE_PARSE_RETRIES = 2
-
-
-class HarmonyUnwrappingJSONAdapter(JSONAdapter):
-    """JSONAdapter that strips gpt-oss Harmony ``{"final": "..."}`` envelopes."""
-
-    @override
-    def parse(self, signature: type[Signature], completion: str) -> dict[str, Any]:
-        return super().parse(signature, self._unwrap_harmony(completion))
-
-    @staticmethod
-    def _unwrap_harmony(completion: str) -> str:
-        if not completion:
-            return ""
-        try:
-            outer = json.loads(completion)
-        except json.JSONDecodeError:
-            return completion
-        if isinstance(outer, dict) and set(outer.keys()) == {"final"}:
-            inner = outer["final"]
-            unwrapped = inner if isinstance(inner, str) else json.dumps(inner)
-            logger.debug("Unwrapped Harmony envelope (inner length=%d)", len(unwrapped))
-            return unwrapped
-        return completion
-
-
-def _peek_last_finish_reason() -> str | None:
-    """Best-effort finish_reason of the most recent dspy LM call (racy across threads)."""
-    try:
-        history = dspy.settings.lm.history
-        if not history:
-            return None
-        response = history[-1].get("response")
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            return None
-        return getattr(choices[0], "finish_reason", None)
-    except Exception:
-        return None
-
-
-def call_judge_n[JudgeResult](
-    evaluator: Callable[..., JudgeResult],
-    *,
-    n: int,
-    temperature: float,
-    **kwargs: Any,
-) -> list[JudgeResult]:
-    """Call a DSPy judge module once or N times, retrying ``AdapterParseError`` per call."""
-
-    def _call_with_retries(rollout_id: int | None) -> JudgeResult:
-        last_exc: Exception | None = None
-        for attempt in range(JUDGE_PARSE_RETRIES + 1):
-            try:
-                if rollout_id is None and attempt == 0:
-                    return evaluator(**kwargs)
-                effective_rollout_id = (rollout_id if rollout_id is not None else 0) + attempt
-                effective_temperature = temperature if rollout_id is not None else max(temperature, 1.0)
-                return evaluator(
-                    **kwargs,
-                    config={"rollout_id": effective_rollout_id, "temperature": effective_temperature},
-                )
-            except AdapterParseError as e:
-                last_exc = e
-                lm_response = getattr(e, "lm_response", "") or ""
-                head = lm_response[:300].replace("\n", "\\n")
-                tail = lm_response[-300:].replace("\n", "\\n") if len(lm_response) > 300 else ""
-                logger.warning(
-                    "Judge parse failure (attempt %d/%d, rollout_id=%s, finish_reason=%s, "
-                    "lm_response_len=%d, lm_response_head=%r, lm_response_tail=%r): %s",
-                    attempt + 1,
-                    JUDGE_PARSE_RETRIES + 1,
-                    rollout_id,
-                    _peek_last_finish_reason(),
-                    len(lm_response),
-                    head,
-                    tail,
-                    str(e).splitlines()[0][:200],
-                )
-            except LiteLLMAPIError as e:
-                logger.warning(
-                    "Judge LM API error after dspy retries (rollout_id=%s): %s: %s",
-                    rollout_id,
-                    type(e).__name__,
-                    str(e).splitlines()[0][:200],
-                )
-                raise
-        assert last_exc is not None
-        raise last_exc
-
-    if n <= 1:
-        return [_call_with_retries(rollout_id=None)]
-
-    results: list[JudgeResult] = []
-    last_exc: Exception | None = None
-    for shot in range(n):
-        try:
-            results.append(_call_with_retries(rollout_id=shot * (JUDGE_PARSE_RETRIES + 1)))
-        except (AdapterParseError, LiteLLMAPIError) as e:
-            last_exc = e
-    if not results:
-        assert last_exc is not None
-        raise last_exc
-    if len(results) < n:
-        logger.warning(
-            "Multi-shot judge call had partial failures: %d/%d rollouts succeeded. "
-            "Aggregating over surviving rollouts.",
-            len(results),
-            n,
-        )
-    return results
-
-
-def _parse_bool_verdicts(verdicts, expected_length: int) -> list[bool]:
-    """Coerce ``verdicts`` to a ``list[bool]`` of exactly ``expected_length``."""
-    if not isinstance(verdicts, list):
-        return [False] * expected_length
-    bool_verdicts = [bool(v) for v in verdicts]
-    if len(bool_verdicts) < expected_length:
-        bool_verdicts.extend([False] * (expected_length - len(bool_verdicts)))
-    return bool_verdicts[:expected_length]
+    return build_judge_lm(CONFIG.hallucination_judge_llm)
 
 
 class StatusCorrectness(Module):
@@ -202,147 +90,6 @@ class StatusCorrectness(Module):
             score=1.0 if is_correct else 0.0,
             is_correct=is_correct,
             reasoning=(f"'{llm_status}' {'matches' if is_correct else 'does not match'} '{expected_status}'"),
-        )
-
-
-class ClaimExtractionSignature(Signature):
-    """Extract all atomic factual claims from the given text. Each claim must be a
-    single, self-contained factual statement that can be independently verified.
-    Do NOT include opinions, questions, or hedged/uncertain statements.
-    """
-
-    text: str = InputField(desc="The text to extract claims from")
-    question: str = InputField(desc="The question being answered, for context")
-    claims: list[str] = OutputField(
-        desc="List of atomic factual claims extracted from the text, each a complete sentence"
-    )
-
-
-class ClaimSupportVerificationSignature(Signature):
-    """For each claim, determine whether it is supported by the reference text.
-    A claim is supported if the reference text explicitly states or logically entails
-    the information in the claim. Be strict: if the reference does not contain
-    sufficient information to verify a claim, mark it as NOT supported.
-    """
-
-    claims: list[str] = InputField(desc="List of claims to verify, in order")
-    reference: str = InputField(desc="The reference text to verify claims against")
-    question: str = InputField(desc="The question being answered, for context")
-    verdicts: list[bool] = OutputField(
-        desc="For each claim (same order): True if supported/entailed by the reference, False otherwise"
-    )
-
-
-class FactualCorrectnessF1(Module):
-    """Claim-level F1 of LLM answer vs gold answer; precision uses gold+context."""
-
-    def __init__(self, n: int = 1, temperature: float = 0.3):
-        """Initialise claim extractor and verifier with multi-shot config."""
-        super().__init__()
-        self.claim_extractor = dspy.ChainOfThought(ClaimExtractionSignature)
-        self.claim_verifier = dspy.ChainOfThought(ClaimSupportVerificationSignature)
-        self.n = n
-        self.temperature = temperature
-
-    def _extract_claims(self, text: str, question: str) -> list[str]:
-        """Extract claims from the given text."""
-        results = call_judge_n(
-            self.claim_extractor,
-            n=1,
-            temperature=self.temperature,
-            text=text,
-            question=question,
-        )
-        claims = results[0].claims
-        if not isinstance(claims, list):
-            return []
-        return [c for c in claims if isinstance(c, str) and c.strip()]
-
-    def forward(self, question: str, gold_answer: str, llm_answer: str, context_documents: str) -> Prediction:
-        """Compute precision/recall/F1 via claim extraction and binary verification."""
-        # Step 1: Extract claims from both answers (deterministic, once)
-        gold_claims = self._extract_claims(gold_answer, question)
-        llm_claims = self._extract_claims(llm_answer, question)
-
-        # Edge case: both empty
-        if not gold_claims and not llm_claims:
-            return Prediction(
-                score=1.0,
-                precision=1.0,
-                recall=1.0,
-                f1_score=1.0,
-                gold_claims=[],
-                llm_claims=[],
-                precision_verdicts=[],
-                recall_verdicts=[],
-                judge_score_variance=0.0,
-            )
-
-        # Step 2: Verify claims n times for robustness
-        # --- Precision (LLM claims vs gold answer + context) ---
-        if llm_claims:
-            p_results = call_judge_n(
-                self.claim_verifier,
-                n=self.n,
-                temperature=self.temperature,
-                claims=llm_claims,
-                reference=context_documents + "\n\n" + gold_answer,
-                question=question,
-            )
-            sample_precisions = [
-                sum(_parse_bool_verdicts(r.verdicts, len(llm_claims))) / len(llm_claims) for r in p_results
-            ]
-        else:
-            p_results = []
-            # No LLM claims: precise but recall will penalize
-            sample_precisions = [1.0] * self.n
-
-        # --- Recall (gold claims vs LLM answer) ---
-        if gold_claims:
-            r_results = call_judge_n(
-                self.claim_verifier,
-                n=self.n,
-                temperature=self.temperature,
-                claims=gold_claims,
-                reference=llm_answer,
-                question=question,
-            )
-            sample_recalls = [
-                sum(_parse_bool_verdicts(r.verdicts, len(gold_claims))) / len(gold_claims) for r in r_results
-            ]
-        else:
-            r_results = []
-            sample_recalls = [1.0] * self.n
-
-        # Step 3: Compute final scores
-        sample_f1s = [f1_score(p, r) for p, r in zip(sample_precisions, sample_recalls)]
-        final_p = median_score(sample_precisions)
-        final_r = median_score(sample_recalls)
-        final_f1 = f1_score(final_p, final_r)
-
-        # Pick representative verdicts from the run closest to median F1
-        representative_idx = closest_index(sample_f1s, final_f1)
-        rep_p_verdicts = (
-            _parse_bool_verdicts(p_results[representative_idx].verdicts, len(llm_claims))
-            if llm_claims and p_results
-            else []
-        )
-        rep_r_verdicts = (
-            _parse_bool_verdicts(r_results[representative_idx].verdicts, len(gold_claims))
-            if gold_claims and r_results
-            else []
-        )
-
-        return Prediction(
-            score=final_f1,
-            precision=final_p,
-            recall=final_r,
-            f1_score=final_f1,
-            gold_claims=gold_claims,
-            llm_claims=llm_claims,
-            precision_verdicts=rep_p_verdicts,
-            recall_verdicts=rep_r_verdicts,
-            judge_score_variance=score_variance(sample_f1s),
         )
 
 
@@ -421,12 +168,12 @@ class ContextGroundedness(Module):
             question=question,
         )
 
-        scores = [sum(_parse_bool_verdicts(r.verdicts, len(claims))) / len(claims) for r in results]
+        scores = [sum(parse_bool_verdicts(r.verdicts, len(claims))) / len(claims) for r in results]
 
         # Step 3: Final score (median across n runs)
         score = median_score(scores)
         representative_idx = closest_index(scores, score)
-        rep_verdicts = _parse_bool_verdicts(results[representative_idx].verdicts, len(claims))
+        rep_verdicts = parse_bool_verdicts(results[representative_idx].verdicts, len(claims))
 
         return Prediction(
             score=score,
@@ -674,6 +421,14 @@ class HallucinationMetric(DatasetAwareMetric):
     name: str = "Hallucination"
     tasks: list[Task] = [Task.HALLUCINATION]
     nan_policy: NanPolicy = NanPolicy.OMIT
+    judge_llm_config: str | None = "hallucination_judge_llm"
+
+    APPLICABLE_SCORES: dict[str, tuple[str, ...]] = {
+        "ANSWERABLE": ("status_correctness", "factual_correctness", "document_f1", "context_groundedness"),
+        "UNANSWERABLE": ("status_correctness", "refusal_quality", "knowledge_leakage_avoidance"),
+        "CONFLICTING": ("status_correctness", "conflict_detection_quality", "document_f1"),
+    }
+    """Which sub-scores each question type is actually scored on, named as scored. The rest are NaN by design."""
 
     def __init__(self, dataset: Dataset, selected_indices: list[int] | None = None) -> None:
         """Instantiate the judge LM and per-question-type sub-evaluators."""
@@ -682,6 +437,7 @@ class HallucinationMetric(DatasetAwareMetric):
             "hallucination_judge_llm config is required for the Hallucination metric."
         )
         self.config = CONFIG.hallucination
+        self._check_weight_keys()
         dspy.configure(lm=_build_hallucination_judge_lm(), adapter=HarmonyUnwrappingJSONAdapter())
         judge_n = self.config.judge_n
         judge_temperature = CONFIG.hallucination_judge_llm.lm_args.temperature or 0.0
@@ -700,10 +456,44 @@ class HallucinationMetric(DatasetAwareMetric):
         self._refusal_quality = RefusalQuality(n=judge_n, temperature=judge_temperature)
         self._knowledge_leakage = KnowledgeLeakage(n=judge_n, temperature=judge_temperature)
         self._conflict_detection_quality = ConflictDetectionQuality(n=judge_n, temperature=judge_temperature)
+        self._item_statuses: dict[str, list[str | None]] = {}
+
+    def _check_weight_keys(self) -> None:
+        """Reject configured weights that name a sub-score the question type is not scored on.
+
+        The composite is a weighted sum over sub-scores looked up by name, defaulting to 0.0 for a
+        name that never lands. A weight the branch does not produce would therefore lower every
+        composite of that question type by its weight, with nothing in the log to say so.
+
+        Raises:
+            ValueError: If any of the three weight blocks names a sub-score outside its branch.
+        """
+        blocks = {
+            "ANSWERABLE": self.config.answerable_weights,
+            "UNANSWERABLE": self.config.unanswerable_weights,
+            "CONFLICTING": self.config.conflicting_weights,
+        }
+        for qtype, weights in blocks.items():
+            applicable = self.APPLICABLE_SCORES[qtype]
+            unknown = sorted(set(weights) - set(applicable))
+            if unknown:
+                raise ValueError(
+                    f"Hallucination {qtype.lower()}_weights name sub-scores that are not scored for "
+                    f"{qtype} questions: {unknown}. Valid names: {sorted(applicable)}."
+                )
 
     @override
     def description(self) -> str:
         return "LLM-as-judge hallucination benchmark score. Higher is better."
+
+    @override
+    def item_statuses(self) -> dict[str, list[str | None]] | None:
+        """Return per-row statuses, separating judge failures from question types a score omits.
+
+        Both show up as NaN in the scores, but only the first is a failure: counting a dimension
+        that does not apply to a question type as a failure would understate every model.
+        """
+        return self._item_statuses or None
 
     @override
     def evaluate(self, model_output: list[str], labels: list[str]) -> dict[str, list[float]]:
@@ -726,24 +516,11 @@ class HallucinationMetric(DatasetAwareMetric):
                 f"Got {len(model_output)} model outputs for a dataset with {len(questions)} rows."
             )
 
-        result: dict[str, list[float]] = {
-            "hallucination_benchmark_score": [],
-            "status_accuracy": [],
-            "factual_correctness": [],
-            "reference_f1": [],
-            "context_groundedness": [],
-            "refusal_quality": [],
-            "knowledge_leakage_avoidance": [],
-            "conflict_handling": [],
-        }
-        evaluator_result: dict[str, list[float]] = {
-            "evaluator_judge_self_consistency_variance": [],
-            "evaluator_factual_correctness_variance": [],
-            "evaluator_context_groundedness_variance": [],
-            "evaluator_refusal_quality_variance": [],
-            "evaluator_knowledge_leakage_avoidance_variance": [],
-            "evaluator_conflict_handling_variance": [],
-        }
+        result: dict[str, list[float]] = {published: [] for published in _PUBLISHED_SCORE_KEY.values()}
+        evaluator_result: dict[str, list[float]] = {"evaluator_judge_self_consistency_variance": []}
+        evaluator_result.update({_variance_key(key): [] for key in _JUDGE_SAMPLED_SCORES})
+
+        statuses: dict[str, list[str | None]] = {key: [] for key in result}
 
         samples = zip(
             questions,
@@ -773,32 +550,15 @@ class HallucinationMetric(DatasetAwareMetric):
 
             qtype = normalize_hallucination_question_type(t)
 
-            row_scores: dict[str, float] = {
-                "status_accuracy": nan,
-                "factual_correctness": nan,
-                "reference_f1": nan,
-                "context_groundedness": nan,
-                "refusal_quality": nan,
-                "knowledge_leakage_avoidance": nan,
-                "conflict_handling": nan,
-                "hallucination_benchmark_score": nan,
-            }
-            row_evaluator_variances: dict[str, float] = {
-                "evaluator_judge_self_consistency_variance": nan,
-                "evaluator_factual_correctness_variance": nan,
-                "evaluator_context_groundedness_variance": nan,
-                "evaluator_refusal_quality_variance": nan,
-                "evaluator_knowledge_leakage_avoidance_variance": nan,
-                "evaluator_conflict_handling_variance": nan,
-            }
+            scores: dict[str, float] = {}
+            variances: dict[str, float] = {}
+            weighted_judge_variance = nan
 
-            try:
-                row_scores["status_accuracy"] = self._status_correctness(
+            with CatchJudgeFailure(f"hallucination row (question={q[:60]!r})") as caught:
+                scores["status_correctness"] = self._status_correctness(
                     llm_status=llm_status.value,
                     expected_status=qtype,
                 ).score
-                sample_score: dict[str, float] = {"status_correctness": row_scores["status_accuracy"]}
-                sample_score_variance: dict[str, float] = {}
 
                 if qtype == "ANSWERABLE":
                     factual_correctness = self._factual_correctness(
@@ -807,60 +567,35 @@ class HallucinationMetric(DatasetAwareMetric):
                         llm_answer=llm_response,
                         context_documents=doc_context,
                     )
-                    sample_score["factual_correctness"] = factual_correctness.score
-                    row_scores["factual_correctness"] = factual_correctness.score
-                    sample_score_variance["factual_correctness"] = factual_correctness.judge_score_variance
-                    row_evaluator_variances["evaluator_factual_correctness_variance"] = (
-                        factual_correctness.judge_score_variance
-                    )
-                    sample_score["document_f1"] = self._document_accuracy(
+                    scores["factual_correctness"] = factual_correctness.score
+                    variances["factual_correctness"] = factual_correctness.judge_score_variance
+                    scores["document_f1"] = self._document_accuracy(
                         llm_documents=llm_refs, gold_documents=gold_refs
                     ).score
-                    row_scores["reference_f1"] = sample_score["document_f1"]
                     context_groundedness = self._context_groundedness(
                         question=q,
                         context_documents=doc_context,
                         llm_answer=llm_response,
                     )
-                    sample_score["context_groundedness"] = context_groundedness.score
-                    row_scores["context_groundedness"] = context_groundedness.score
-                    sample_score_variance["context_groundedness"] = context_groundedness.judge_score_variance
-                    row_evaluator_variances["evaluator_context_groundedness_variance"] = (
-                        context_groundedness.judge_score_variance
-                    )
-                    weighted_score = sum(
-                        sample_score.get(k, 0.0) * w for k, w in self.config.answerable_weights.items()
-                    )
-                    weighted_judge_variance = sum(
-                        sample_score_variance.get(k, 0.0) * w for k, w in self.config.answerable_weights.items()
-                    )
+                    scores["context_groundedness"] = context_groundedness.score
+                    variances["context_groundedness"] = context_groundedness.judge_score_variance
+                    weights = self.config.answerable_weights
                 elif qtype == "UNANSWERABLE":
                     refusal_quality = self._refusal_quality(
                         question=q,
                         context_documents=doc_context,
                         llm_response=llm_response,
                     )
-                    sample_score["refusal_quality"] = refusal_quality.score
-                    row_scores["refusal_quality"] = refusal_quality.score
-                    sample_score_variance["refusal_quality"] = refusal_quality.judge_score_variance
-                    row_evaluator_variances["evaluator_refusal_quality_variance"] = refusal_quality.judge_score_variance
+                    scores["refusal_quality"] = refusal_quality.score
+                    variances["refusal_quality"] = refusal_quality.judge_score_variance
                     knowledge_leakage = self._knowledge_leakage(
                         question=q,
                         context_documents=doc_context,
                         llm_response=llm_response,
                     )
-                    sample_score["knowledge_leakage"] = knowledge_leakage.score
-                    row_scores["knowledge_leakage_avoidance"] = knowledge_leakage.score
-                    sample_score_variance["knowledge_leakage"] = knowledge_leakage.judge_score_variance
-                    row_evaluator_variances["evaluator_knowledge_leakage_avoidance_variance"] = (
-                        knowledge_leakage.judge_score_variance
-                    )
-                    weighted_score = sum(
-                        sample_score.get(k, 0.0) * w for k, w in self.config.unanswerable_weights.items()
-                    )
-                    weighted_judge_variance = sum(
-                        sample_score_variance.get(k, 0.0) * w for k, w in self.config.unanswerable_weights.items()
-                    )
+                    scores["knowledge_leakage_avoidance"] = knowledge_leakage.score
+                    variances["knowledge_leakage_avoidance"] = knowledge_leakage.judge_score_variance
+                    weights = self.config.unanswerable_weights
                 elif qtype == "CONFLICTING":
                     conflict_detection_quality = self._conflict_detection_quality(
                         question=q,
@@ -868,44 +603,36 @@ class HallucinationMetric(DatasetAwareMetric):
                         llm_response=llm_response,
                         gold_documents=gold_refs,
                     )
-                    sample_score["conflict_detection_quality"] = conflict_detection_quality.score
-                    row_scores["conflict_handling"] = conflict_detection_quality.score
-                    sample_score_variance["conflict_detection_quality"] = (
-                        conflict_detection_quality.judge_score_variance
-                    )
-                    row_evaluator_variances["evaluator_conflict_handling_variance"] = (
-                        conflict_detection_quality.judge_score_variance
-                    )
-                    sample_score["document_f1"] = self._document_accuracy(
+                    scores["conflict_detection_quality"] = conflict_detection_quality.score
+                    variances["conflict_detection_quality"] = conflict_detection_quality.judge_score_variance
+                    scores["document_f1"] = self._document_accuracy(
                         llm_documents=llm_refs, gold_documents=gold_refs
                     ).score
-                    row_scores["reference_f1"] = sample_score["document_f1"]
-                    weighted_score = sum(
-                        sample_score.get(k, 0.0) * w for k, w in self.config.conflicting_weights.items()
-                    )
-                    weighted_judge_variance = sum(
-                        sample_score_variance.get(k, 0.0) * w for k, w in self.config.conflicting_weights.items()
-                    )
+                    weights = self.config.conflicting_weights
                 else:
                     logger.warning("Unknown question type %r for question %r. Skipping detailed evaluation.", qtype, q)
-                    weighted_score = sample_score["status_correctness"]  # Fallback to just status correctness
-                    weighted_judge_variance = 0.0
+                    weights = {"status_correctness": 1.0}
 
-                row_scores["hallucination_benchmark_score"] = weighted_score
-                row_evaluator_variances["evaluator_judge_self_consistency_variance"] = weighted_judge_variance
-            except (AdapterParseError, LiteLLMAPIError) as e:
+                scores[COMPOSITE_SCORE] = sum(scores.get(key, 0.0) * w for key, w in weights.items())
+                weighted_judge_variance = sum(variances.get(key, 0.0) * w for key, w in weights.items())
+            if caught.failed:
                 judge_failure_count += 1
-                logger.error(
-                    "Hallucination metric failed on row (question=%r) after retries (%s): %s. Recording NaN scores.",
-                    q[:60],
-                    type(e).__name__,
-                    str(e).splitlines()[0][:200],
-                )
 
-            for key, value in row_scores.items():
-                result[key].append(value)
-            for key, value in row_evaluator_variances.items():
-                evaluator_result[key].append(value)
+            applicable = self.APPLICABLE_SCORES.get(qtype, ("status_correctness",)) + (COMPOSITE_SCORE,)
+            for key, published in _PUBLISHED_SCORE_KEY.items():
+                value = scores.get(key, nan)
+                result[published].append(value)
+                if key not in applicable:
+                    statuses[published].append(None)
+                else:
+                    statuses[published].append(
+                        ItemStatus.OK.value if not isnan(value) else ItemStatus.JUDGE_FAILED.value
+                    )
+            evaluator_result["evaluator_judge_self_consistency_variance"].append(weighted_judge_variance)
+            for key in _JUDGE_SAMPLED_SCORES:
+                evaluator_result[_variance_key(key)].append(variances.get(key, nan))
+
+        self._item_statuses = statuses
 
         if self.config.judge_n > 1:
             result.update(evaluator_result)
