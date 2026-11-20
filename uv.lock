@@ -439,9 +439,9 @@ name = "boto3"
 version = "1.43.125"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "botocore", marker = "python_full_version < '3.15'" },
-    { name = "jmespath", marker = "python_full_version < '3.15'" },
-    { name = "s3transfer", marker = "python_full_version < '3.15'" },
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f2/c2/9285c749ca49c213ad90aa239884d0c5cbbdc58f02c4c44bcc4a3bf59023/boto3-1.43.125.tar.gz", hash = "sha256:5a635a0fbbd51f319e465b809cf043668705defbb9dddaf26ae66747f70b2a49", size = 112651 }
 wheels = [
@@ -453,9 +453,9 @@ name = "botocore"
 version = "1.43.125"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jmespath", marker = "python_full_version < '3.15'" },
-    { name = "python-dateutil", marker = "python_full_version < '3.15'" },
-    { name = "urllib3", marker = "python_full_version < '3.15'" },
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ad/57/6d638614c940c73a750b8a4203989b3edbde5ff7f83cd9031e65cb97d69b/botocore-1.43.125.tar.gz", hash = "sha256:e3ae5ebbfa8033015958a9cb16cef67a0592902ca8afb46ef06e8ae77475183f", size = 16520959 }
 wheels = [
@@ -1643,8 +1643,8 @@ name = "h2"
 version = "4.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "hpack", marker = "python_full_version < '3.15'" },
-    { name = "hyperframe", marker = "python_full_version < '3.15'" },
+    { name = "hpack" },
+    { name = "hyperframe" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/85/7c366e69d84c17bb778fe41419e1fbcce3033d5b7ce29bbffff0a98b859f/h2-4.4.1.tar.gz", hash = "sha256:4e866ffb1a869ae14dd9b5e6beb5c24a13da0495ad72b65925ded182521c1516", size = 2157281 }
 wheels = [
@@ -1727,7 +1727,7 @@ wheels = [
 
 [package.optional-dependencies]
 http2 = [
-    { name = "h2", marker = "python_full_version < '3.15'" },
+    { name = "h2" },
 ]
 
 [[package]]
@@ -2609,27 +2609,27 @@ name = "litellm"
 version = "1.110.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp", marker = "python_full_version < '3.15'" },
-    { name = "anyio", marker = "python_full_version < '3.15'" },
-    { name = "boto3", marker = "python_full_version < '3.15'" },
-    { name = "certifi", marker = "python_full_version < '3.15'" },
-    { name = "click", marker = "python_full_version < '3.15'" },
+    { name = "aiohttp" },
+    { name = "anyio" },
+    { name = "boto3" },
+    { name = "certifi" },
+    { name = "click" },
     { name = "fastuuid", marker = "python_full_version < '3.15'" },
-    { name = "filelock", marker = "python_full_version < '3.15'" },
-    { name = "httpx", extra = ["http2"], marker = "python_full_version < '3.15'" },
-    { name = "huggingface-hub", marker = "python_full_version < '3.15'" },
-    { name = "importlib-metadata", marker = "python_full_version < '3.15'" },
-    { name = "jinja2", marker = "python_full_version < '3.15'" },
-    { name = "jsonschema", marker = "python_full_version < '3.15'" },
-    { name = "openai", marker = "python_full_version < '3.15'" },
-    { name = "packaging", marker = "python_full_version < '3.15'" },
-    { name = "pydantic", marker = "python_full_version < '3.15'" },
-    { name = "pydantic-settings", marker = "python_full_version < '3.15'" },
-    { name = "python-dotenv", marker = "python_full_version < '3.15'" },
-    { name = "pyyaml", marker = "python_full_version < '3.15'" },
-    { name = "tiktoken", marker = "python_full_version < '3.15'" },
-    { name = "tokenizers", marker = "python_full_version < '3.15'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.15'" },
+    { name = "filelock" },
+    { name = "httpx", extra = ["http2"] },
+    { name = "huggingface-hub" },
+    { name = "importlib-metadata" },
+    { name = "jinja2" },
+    { name = "jsonschema" },
+    { name = "openai" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "tiktoken" },
+    { name = "tokenizers" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/c4/7dce34b0598c5eb5af455e5200a97202644e077a65bd404439050cbb7a1a/litellm-1.110.0.tar.gz", hash = "sha256:6223f8385534dd544773e945284e2b4090d7f03393e3344fb3e5e57111076065", size = 25950954 }
 wheels = [
@@ -2658,6 +2658,7 @@ dependencies = [
     { name = "langchain-community" },
     { name = "langchain-core" },
     { name = "langchain-openai" },
+    { name = "litellm" },
     { name = "lxml" },
     { name = "mlflow-skinny" },
     { name = "ollama" },
@@ -2711,6 +2712,7 @@ requires-dist = [
     { name = "langchain-community", specifier = "<0.4.2" },
     { name = "langchain-core", specifier = ">=0.3.74" },
     { name = "langchain-openai", specifier = ">=0.3.12" },
+    { name = "litellm", specifier = ">=1.110.0" },
     { name = "lxml", specifier = ">=5.3.0" },
     { name = "mlflow-skinny", specifier = ">=2.17.0" },
     { name = "ollama", specifier = ">=0.5.3" },
@@ -5285,7 +5287,7 @@ name = "s3transfer"
 version = "0.19.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "botocore", marker = "python_full_version < '3.15'" },
+    { name = "botocore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/49/c5/0a5ce655109cb96b8dfad36908a4e108d15f5dc2eff8fbc3146c4312e704/s3transfer-0.19.3.tar.gz", hash = "sha256:8326acc3d056d7f7b8a37110c7d2aea41f67e83f6ae79cd3b5fbcca34c726406", size = 166087 }
 wheels = [
